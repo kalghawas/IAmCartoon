@@ -1,0 +1,6 @@
+{
+  "name": "I Am whatsapp",
+  "description": "Animate conversation transcripts inside a pixel-accurate Android WhatsApp chat screen with screenshots and real-time video export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
