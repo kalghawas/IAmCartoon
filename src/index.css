@@ -1,20 +1,27 @@
 @import "tailwindcss";
 
-/* Sleek dark scrollbar */
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+}
+
+.font-cartoon {
+  font-family: 'DynaPuff', 'Luckiest Guy', 'Chewy', cursive, sans-serif;
+}
+
+/* Custom scrollbars for high-density dashboard */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
-
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: #0f172a;
 }
-
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
+  background: #334155;
   border-radius: 9999px;
 }
-
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.25);
+  background: #475569;
 }

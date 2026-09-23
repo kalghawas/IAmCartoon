@@ -1,902 +1,608 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
-  User,
-  Smartphone,
-  Clock,
-  BatteryCharging,
-  ArrowLeftRight,
-  Sparkles,
-  Check,
-  Upload,
+  Key,
+  ShieldCheck,
+  Cpu,
   Sliders,
-  Moon,
-  Sun,
-  Palette,
-  Shield,
-  Zap,
-  Download,
-  Film,
-  Image as ImageIcon,
+  RotateCcw,
+  Eye,
+  EyeOff,
+  Check,
+  Info,
+  HelpCircle,
+  AlertTriangle,
+  Lock,
+  Unlock,
+  Pencil,
+  ChevronDown
 } from 'lucide-react';
-import {
-  ContactSettings,
-  AnimationSettings,
-  ThemeColors,
-  ChatThemeMode,
-  AndroidDeviceModel,
-  AndroidNavStyle,
-  ExportFormat,
-  ExportResolution,
-} from '../types';
-import {
-  ARABIC_AVATARS,
-  CARTOON_AVATARS,
-  REALISTIC_AVATARS,
-  AvatarItem,
-} from '../constants/avatarLibrary';
+import { AppSettings, AIProviderId, UserProfile } from '../types';
+import { DEFAULT_SYSTEM_PROMPT } from '../utils/constants';
+import { AI_PROVIDERS } from '../utils/aiProviders';
+import { ApiInstructionsModal } from './ApiInstructionsModal';
+import { User, LogOut, Sparkles } from 'lucide-react';
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
-  contact: ContactSettings;
-  onChangeContact: (contact: ContactSettings) => void;
-  animSettings: AnimationSettings;
-  onChangeAnimSettings: (settings: AnimationSettings) => void;
-  theme: ThemeColors;
-  onToggleTheme: () => void;
-  exportFormat?: ExportFormat;
-  onChangeExportFormat?: (fmt: ExportFormat) => void;
-  exportResolution?: ExportResolution;
-  onChangeExportResolution?: (res: ExportResolution) => void;
+  settings: AppSettings;
+  onSaveSettings: (newSettings: AppSettings) => void;
+  currentUser?: UserProfile | null;
+  onOpenAuthModal?: () => void;
+  onLogout?: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
-  contact,
-  onChangeContact,
-  animSettings,
-  onChangeAnimSettings,
-  theme,
-  onToggleTheme,
-  exportFormat = 'mp4',
-  onChangeExportFormat,
-  exportResolution = '1080p',
-  onChangeExportResolution,
+  settings,
+  onSaveSettings,
+  currentUser,
+  onOpenAuthModal,
+  onLogout
 }) => {
-  const [activeTab, setActiveTab] = useState<'profile' | 'device' | 'status' | 'playback' | 'theme' | 'export'>('profile');
-  const [activePersonTab, setActivePersonTab] = useState<'B' | 'A'>('B');
-  const [avatarCategory, setAvatarCategory] = useState<'arabic' | 'cartoon' | 'realistic' | 'custom'>('arabic');
+  const [provider, setProvider] = useState<AIProviderId>(settings.provider || 'google');
+  const [apiKey, setApiKey] = useState(settings.geminiApiKey || '');
+  const [useMockMode, setUseMockMode] = useState(settings.useMockMode);
+  const [model, setModel] = useState<string>(settings.model || 'gemini-3.1-flash-image');
+  const [aspectRatio, setAspectRatio] = useState(settings.aspectRatio);
+  const [systemPrompt, setSystemPrompt] = useState(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT);
+  const [showKey, setShowKey] = useState(false);
+  const [savedSuccess, setSavedSuccess] = useState(false);
+  const [isPromptLocked, setIsPromptLocked] = useState(true);
+  const [isGuideModalOpen, setIsGuideModalOpen] = useState(false);
+  const [isTestingKey, setIsTestingKey] = useState(false);
+  const [testResult, setTestResult] = useState<{ status: 'success' | 'error'; message: string } | null>(null);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  // Synchronize when opened
+  useEffect(() => {
+    if (isOpen) {
+      setProvider(settings.provider || 'google');
+      setApiKey(settings.geminiApiKey || '');
+      setUseMockMode(settings.useMockMode);
+      setModel(settings.model || 'gemini-3.1-flash-image');
+      setAspectRatio(settings.aspectRatio);
+      setSystemPrompt(settings.systemPrompt || DEFAULT_SYSTEM_PROMPT);
+      setIsPromptLocked(true);
+      setTestResult(null);
+    }
+  }, [isOpen, settings]);
+
+  const activeProviderInfo =
+    AI_PROVIDERS.find((p) => p.id === provider) || AI_PROVIDERS[0];
+
+  // If provider changes and current model isn't in new provider's list, auto-select first model
+  const handleProviderChange = (newProvider: AIProviderId) => {
+    setProvider(newProvider);
+    setTestResult(null);
+    const targetInfo = AI_PROVIDERS.find((p) => p.id === newProvider) || AI_PROVIDERS[0];
+    if (targetInfo.models.length > 0) {
+      const modelExists = targetInfo.models.some((m) => m.id === model);
+      if (!modelExists) {
+        setModel(targetInfo.models[0].id);
+      }
+    }
+  };
 
   if (!isOpen) return null;
 
-  const currentSelectedUrl =
-    activePersonTab === 'B' ? contact.avatarUrl : contact.senderAvatarUrl || '';
-
-  const handleSelectPreset = (avatar: AvatarItem) => {
-    if (activePersonTab === 'B') {
-      onChangeContact({ ...contact, avatarUrl: avatar.url });
-    } else {
-      onChangeContact({ ...contact, senderAvatarUrl: avatar.url });
+  const handleTestKey = async (modelToTest?: string) => {
+    const targetModel = modelToTest || model;
+    if (provider !== 'pollinations' && !apiKey.trim()) {
+      setTestResult({ status: 'error', message: `Please enter an API key for ${activeProviderInfo.name}.` });
+      return;
+    }
+    setIsTestingKey(true);
+    setTestResult(null);
+    try {
+      const res = await fetch('/api/verify-key', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-gemini-key': apiKey.trim(),
+          'x-ai-provider': provider,
+          'x-ai-model': targetModel
+        },
+        body: JSON.stringify({
+          provider,
+          model: targetModel,
+          apiKey: apiKey.trim()
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.valid) {
+        setTestResult({
+          status: 'success',
+          message: data.message || `✅ Model "${targetModel}" is active and verified!`
+        });
+      } else {
+        setTestResult({
+          status: 'error',
+          message: `❌ ${data.error || 'Invalid API Key or model unavailable'}`
+        });
+      }
+    } catch (e: any) {
+      setTestResult({ status: 'error', message: `❌ Connection error: ${e.message || 'Unable to connect to verification server'}` });
+    } finally {
+      setIsTestingKey(false);
     }
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        if (event.target?.result) {
-          const dataUrl = event.target.result as string;
-          if (activePersonTab === 'B') {
-            onChangeContact({ ...contact, avatarUrl: dataUrl });
-          } else {
-            onChangeContact({ ...contact, senderAvatarUrl: dataUrl });
-          }
-        }
-      };
-      reader.readAsDataURL(file);
+  // When user clicks a model, select it and automatically verify the selected model if key exists or if free provider
+  const handleModelSelect = (newModelId: string) => {
+    setModel(newModelId);
+    if (apiKey.trim() || provider === 'pollinations') {
+      handleTestKey(newModelId);
     }
   };
 
-  const handleSwapRoles = () => {
-    onChangeContact({
-      ...contact,
-      contactName: contact.senderName,
-      senderName: contact.contactName,
-      avatarUrl: contact.senderAvatarUrl || contact.avatarUrl,
-      senderAvatarUrl: contact.avatarUrl,
+  const handleSave = () => {
+    onSaveSettings({
+      provider,
+      geminiApiKey: apiKey.trim(),
+      useMockMode,
+      model,
+      aspectRatio,
+      systemPrompt: systemPrompt.trim() || DEFAULT_SYSTEM_PROMPT
     });
+    setSavedSuccess(true);
+    setTimeout(() => {
+      setSavedSuccess(false);
+      onClose();
+    }, 400);
+  };
+
+  const handleResetPrompt = () => {
+    setSystemPrompt(DEFAULT_SYSTEM_PROMPT);
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-150">
-      <div
-        className="relative w-full max-w-2xl bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Modal Header */}
-        <div className="px-6 py-4 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/60">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
-              <Sliders className="w-4 h-4" />
+    <>
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-3 sm:p-4 animate-in fade-in duration-200">
+        <div
+          className="relative flex flex-col w-full max-w-xl max-h-[92vh] bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Modal Header */}
+          <div className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-slate-800 bg-slate-900/90 shrink-0">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-lg bg-blue-600/10 border border-blue-500/20 text-blue-400">
+                <Sliders className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-100 font-cartoon">AI Engine Settings</h3>
+                <p className="text-xs text-slate-400">
+                  Select your AI provider, manage API keys, or use instant Offline Mock Mode
+                </p>
+              </div>
             </div>
-            <div>
-              <h2 className="text-base font-semibold text-zinc-100">WhatsApp Settings</h2>
-              <p className="text-xs text-zinc-400">
-                Customize profiles, avatars, Android models, and status bar
-              </p>
+            <button
+              onClick={onClose}
+              className="p-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors cursor-pointer"
+              title="Close dialog"
+              aria-label="Close dialog"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          {/* Modal Content */}
+          <div className="flex-1 p-4 sm:p-6 space-y-5 overflow-y-auto">
+            {/* Studio Account Status */}
+            <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-blue-600/20 border border-blue-500/40 flex items-center justify-center text-blue-400 font-cartoon font-bold">
+                  {currentUser ? currentUser.name.charAt(0).toUpperCase() : <User className="w-4 h-4" />}
+                </div>
+                <div>
+                  <div className="text-sm font-semibold text-slate-200 font-cartoon">
+                    {currentUser ? currentUser.name : 'Studio Account'}
+                  </div>
+                  <p className="text-xs text-slate-400">
+                    {currentUser ? currentUser.email : 'Sign in to sync 3 monthly credits & save variations'}
+                  </p>
+                </div>
+              </div>
+
+              {currentUser ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (onLogout) onLogout();
+                  }}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-rose-400 hover:bg-slate-900 border border-slate-800 transition-colors cursor-pointer"
+                >
+                  Sign Out
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    if (onOpenAuthModal) onOpenAuthModal();
+                  }}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-blue-600 hover:bg-blue-500 shadow-sm transition-all cursor-pointer"
+                >
+                  Sign In
+                </button>
+              )}
+            </div>
+
+            {/* Mock Mode Toggle */}
+            <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div
+                    className={`w-9 h-9 rounded-lg flex items-center justify-center border transition-colors ${
+                      useMockMode
+                        ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                        : 'bg-slate-800 text-slate-400 border-slate-700'
+                    }`}
+                  >
+                    <Cpu className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-slate-200 flex items-center gap-2 font-cartoon">
+                      Offline Mode (100% Local & Private)
+                      {useMockMode && (
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                          Active
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      Your image is processed locally on this device and is not uploaded. Runs without calling any AI, API provider, or backend service.
+                    </p>
+                  </div>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                  <input
+                    type="checkbox"
+                    checked={useMockMode}
+                    onChange={(e) => setUseMockMode(e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
+                </label>
+              </div>
+            </div>
+
+            {/* Token Usage / Fallback Warning Notice */}
+            <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-start gap-2.5 text-xs text-amber-200/90 leading-relaxed">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <strong className="text-amber-300 font-semibold">Automatic Offline Fallback: </strong>
+                If your cloud API key runs out of quota, tokens, or network disconnects, the app seamlessly falls back to Local Offline Mode so you can still create cartoon portraits uninterrupted.
+              </div>
+            </div>
+
+            {/* AI Provider Selector */}
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-slate-300 flex items-center justify-between">
+                <span className="flex items-center gap-1.5">
+                  <Cpu className="w-3.5 h-3.5 text-blue-400" />
+                  AI Service Provider
+                </span>
+                <span className="text-[11px] text-slate-400">Choose your AI platform</span>
+              </label>
+
+              <div className="relative">
+                <select
+                  value={provider}
+                  onChange={(e) => handleProviderChange(e.target.value as AIProviderId)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-blue-500 transition-colors appearance-none cursor-pointer pr-10"
+                >
+                  {AI_PROVIDERS.map((p) => (
+                    <option key={p.id} value={p.id} className="bg-slate-900 text-slate-100 py-1">
+                      {p.name} {p.isFreeAvailable ? '— [Free Tier]' : ''}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              </div>
+            </div>
+
+            {/* API Key Input Section with Instructions Guide Link */}
+            {activeProviderInfo.requiresKey ? (
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-1.5">
+                  <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                    <Key className="w-3.5 h-3.5 text-blue-400" />
+                    API Key for {activeProviderInfo.name.split('(')[0].trim()}
+                  </label>
+
+                  {/* Instructions Guide Button */}
+                  <button
+                    type="button"
+                    onClick={() => setIsGuideModalOpen(true)}
+                    className="text-[11px] font-semibold text-blue-400 hover:text-blue-300 bg-blue-950/70 hover:bg-blue-900/70 border border-blue-700/60 px-2 py-0.5 rounded-lg flex items-center gap-1 transition-all cursor-pointer shadow-sm active:scale-95"
+                  >
+                    <HelpCircle className="w-3 h-3 text-blue-400" />
+                    <span>How to get free API key (Guide)</span>
+                  </button>
+                </div>
+
+                <div className="relative">
+                  <input
+                    type={showKey ? 'text' : 'password'}
+                    value={apiKey}
+                    onChange={(e) => {
+                      const newKey = e.target.value;
+                      setApiKey(newKey);
+                      if (newKey.trim().length > 10 && useMockMode) {
+                        setUseMockMode(false);
+                      }
+                    }}
+                    placeholder={activeProviderInfo.placeholder}
+                    className="w-full px-3.5 py-2.5 pr-10 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-blue-500 transition-colors font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowKey(!showKey)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
+                    title={showKey ? 'Hide key' : 'Show key'}
+                  >
+                    {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+
+                <div className="flex items-center justify-between text-[11px] text-slate-500 px-1">
+                  <span>Key prefix: {activeProviderInfo.keyPrefix}</span>
+                  {apiKey && (
+                    <span className="text-emerald-400 flex items-center gap-1 font-medium">
+                      <ShieldCheck className="w-3.5 h-3.5" /> Stored safely in local browser storage
+                    </span>
+                  )}
+                </div>
+
+                {/* Live Test Key Action & Status */}
+                {apiKey && (
+                  <div className="pt-1">
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleTestKey()}
+                        disabled={isTestingKey}
+                        className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/40 flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                      >
+                        {isTestingKey ? (
+                          <>
+                            <span className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></span>
+                            <span>Testing {model}...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span>Test Selected Model ({model.split('/').pop()?.split('-')[0]}...)</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    {testResult && (
+                      <div
+                        className={`mt-2 p-2.5 rounded-lg text-xs font-medium border ${
+                          testResult.status === 'success'
+                            ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                            : 'bg-rose-500/15 border-rose-500/40 text-rose-300'
+                        }`}
+                      >
+                        {testResult.message}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 space-y-2">
+                <div className="flex items-center gap-2 text-emerald-400 font-semibold text-xs font-cartoon">
+                  <Sparkles className="w-4 h-4" />
+                  <span>No API Key Required!</span>
+                </div>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Pollinations.AI is an open-access public neural network. You can generate unlimited cartoon art directly without creating accounts, providing credit cards, or entering any API keys.
+                </p>
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={() => handleTestKey()}
+                    disabled={isTestingKey}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 flex items-center gap-1.5 transition-all cursor-pointer"
+                  >
+                    {isTestingKey ? (
+                      <>
+                        <span className="w-3 h-3 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin"></span>
+                        <span>Checking Status...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Check Connection Status</span>
+                      </>
+                    )}
+                  </button>
+                  {testResult && (
+                    <div className="mt-2 p-2.5 rounded-lg text-xs font-medium bg-emerald-500/15 border border-emerald-500/40 text-emerald-300">
+                      {testResult.message}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Model Selection Dropdown: One line model, one line description */}
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                <Cpu className="w-3.5 h-3.5 text-blue-400" />
+                Image Model Selection
+              </label>
+
+              <div className="space-y-2">
+                {activeProviderInfo.models.map((m) => {
+                  const isSelected = model === m.id;
+                  return (
+                    <div
+                      key={m.id}
+                      onClick={() => handleModelSelect(m.id)}
+                      className={`p-3 rounded-xl border cursor-pointer transition-all ${
+                        isSelected
+                          ? 'bg-blue-950/40 border-blue-500/80 shadow-sm ring-1 ring-blue-500/40'
+                          : 'bg-slate-950/40 border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      {/* Line 1: AI Model Name */}
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-slate-200 font-mono flex items-center gap-2">
+                          <span className={`w-2 h-2 rounded-full ${isSelected ? 'bg-blue-400 animate-pulse' : 'bg-slate-600'}`}></span>
+                          {m.name}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          {isSelected && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold">
+                              Active Selection
+                            </span>
+                          )}
+                          {m.badge && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30 shrink-0 font-medium">
+                              {m.badge}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Line 2: Quality & capability description */}
+                      <div className="text-[11px] text-slate-400 leading-snug mt-1 pl-4">
+                        {m.qualityDescription}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* AI Image Instructions (Locked with Edit & Reset Icons) */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  {isPromptLocked ? (
+                    <Lock className="w-3.5 h-3.5 text-amber-400" />
+                  ) : (
+                    <Unlock className="w-3.5 h-3.5 text-emerald-400" />
+                  )}
+                  <span>AI Image Instructions</span>
+                  <span
+                    className={`text-[10px] px-1.5 py-0.2 rounded font-medium ${
+                      isPromptLocked
+                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                        : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    }`}
+                  >
+                    {isPromptLocked ? 'Locked' : 'Editable'}
+                  </span>
+                </label>
+
+                <div className="flex items-center gap-1.5">
+                  {/* Edit / Lock Toggle Icon Button */}
+                  <button
+                    type="button"
+                    onClick={() => setIsPromptLocked(!isPromptLocked)}
+                    className={`text-[11px] px-2 py-1 rounded-lg flex items-center gap-1 border transition-all cursor-pointer ${
+                      isPromptLocked
+                        ? 'text-blue-400 hover:text-blue-300 bg-blue-950/60 border-blue-800/60'
+                        : 'text-amber-400 hover:text-amber-300 bg-amber-950/60 border-amber-800/60'
+                    }`}
+                    title={isPromptLocked ? 'Click to unlock and edit instructions' : 'Click to lock instructions'}
+                  >
+                    {isPromptLocked ? (
+                      <>
+                        <Pencil className="w-3 h-3 text-blue-400" />
+                        <span>Edit</span>
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="w-3 h-3 text-amber-400" />
+                        <span>Lock</span>
+                      </>
+                    )}
+                  </button>
+
+                  {/* Reset to Default Icon Button */}
+                  <button
+                    type="button"
+                    onClick={handleResetPrompt}
+                    className="text-[11px] text-slate-400 hover:text-slate-200 bg-slate-800/80 hover:bg-slate-800 border border-slate-700/60 px-2 py-1 rounded-lg flex items-center gap-1 transition-colors cursor-pointer"
+                    title="Reset AI image instructions to original default"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Reset Default</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="relative">
+                <textarea
+                  rows={3}
+                  value={systemPrompt}
+                  onChange={(e) => setSystemPrompt(e.target.value)}
+                  readOnly={isPromptLocked}
+                  placeholder="Enter system guidance for the AI character generator..."
+                  className={`w-full p-3 rounded-xl border text-xs transition-colors leading-relaxed ${
+                    isPromptLocked
+                      ? 'bg-slate-950/50 border-slate-800 text-slate-400 cursor-not-allowed select-none'
+                      : 'bg-slate-950 border-blue-500/80 text-slate-100 focus:outline-none focus:ring-1 focus:ring-blue-500'
+                  }`}
+                />
+                {isPromptLocked && (
+                  <div className="absolute right-3 bottom-3 text-[10px] text-slate-500 flex items-center gap-1 pointer-events-none">
+                    <Lock className="w-3 h-3 text-slate-500" />
+                    <span>Locked to prevent accidental changes</span>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Navigation Tabs */}
-        <div className="flex items-center gap-1 px-6 py-2 border-b border-zinc-800 bg-zinc-950/40 overflow-x-auto text-xs font-medium">
-          <button
-            type="button"
-            onClick={() => setActiveTab('profile')}
-            className={`px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors whitespace-nowrap ${
-              activeTab === 'profile'
-                ? 'bg-zinc-800 text-emerald-400 font-semibold shadow-xs'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <User className="w-3.5 h-3.5" />
-            <span>Profiles & Avatars</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('device')}
-            className={`px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors whitespace-nowrap ${
-              activeTab === 'device'
-                ? 'bg-zinc-800 text-emerald-400 font-semibold shadow-xs'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Smartphone className="w-3.5 h-3.5" />
-            <span>Android Device</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('status')}
-            className={`px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors whitespace-nowrap ${
-              activeTab === 'status'
-                ? 'bg-zinc-800 text-emerald-400 font-semibold shadow-xs'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Clock className="w-3.5 h-3.5" />
-            <span>Status & Clock</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('playback')}
-            className={`px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors whitespace-nowrap ${
-              activeTab === 'playback'
-                ? 'bg-zinc-800 text-emerald-400 font-semibold shadow-xs'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Zap className="w-3.5 h-3.5" />
-            <span>Playback Speed</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('theme')}
-            className={`px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors whitespace-nowrap ${
-              activeTab === 'theme'
-                ? 'bg-zinc-800 text-emerald-400 font-semibold shadow-xs'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Palette className="w-3.5 h-3.5" />
-            <span>Theme</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('export')}
-            className={`px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors whitespace-nowrap ${
-              activeTab === 'export'
-                ? 'bg-zinc-800 text-emerald-400 font-semibold shadow-xs'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>Export & Quality</span>
-          </button>
-        </div>
-
-        {/* Modal Body */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-5">
-          {/* TAB 1: PROFILES & AVATARS */}
-          {activeTab === 'profile' && (
-            <div className="space-y-4">
-              {/* Swap roles bar */}
-              <div className="flex items-center justify-between bg-zinc-950 p-2.5 rounded-xl border border-zinc-800">
-                <span className="text-xs text-zinc-300">
-                  Select which participant to customize:
-                </span>
-                <button
-                  type="button"
-                  onClick={handleSwapRoles}
-                  className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition-colors"
-                >
-                  <ArrowLeftRight className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>⇄ Swap Person A & B</span>
-                </button>
-              </div>
-
-              {/* Dual Person Toggle: Person B (Contact) vs Person A (Sender) */}
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  onClick={() => setActivePersonTab('B')}
-                  className={`p-3 rounded-xl border text-left flex items-center gap-3 transition-all ${
-                    activePersonTab === 'B'
-                      ? 'bg-emerald-950/20 border-emerald-500/50 ring-1 ring-emerald-500'
-                      : 'bg-zinc-950/60 border-zinc-800 opacity-70 hover:opacity-100'
-                  }`}
-                >
-                  <div className="relative w-11 h-11 rounded-full overflow-hidden border border-emerald-500/40 bg-zinc-800 flex-shrink-0">
-                    {contact.avatarUrl ? (
-                      <img
-                        src={contact.avatarUrl}
-                        alt="Contact"
-                        className="w-full h-full object-cover"
-                        crossOrigin="anonymous"
-                      />
-                    ) : (
-                      <div className="w-full h-full bg-emerald-700 flex items-center justify-center text-white font-bold text-sm">
-                        {contact.contactName.charAt(0) || 'C'}
-                      </div>
-                    )}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <span className="text-[10px] text-emerald-400 uppercase font-mono tracking-wider block">
-                      Person B (Contact)
-                    </span>
-                    <span className="text-xs font-semibold text-zinc-100 truncate block">
-                      {contact.contactName}
-                    </span>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setActivePersonTab('A')}
-                  className={`p-3 rounded-xl border text-left flex items-center gap-3 transition-all ${
-                    activePersonTab === 'A'
-                      ? 'bg-cyan-950/20 border-cyan-500/50 ring-1 ring-cyan-500'
-                      : 'bg-zinc-950/60 border-zinc-800 opacity-70 hover:opacity-100'
-                  }`}
-                >
-                  <div className="relative w-11 h-11 rounded-full overflow-hidden border border-cyan-500/40 bg-zinc-800 flex-shrink-0">
-                    {contact.senderAvatarUrl ? (
-                      <img
-                        src={contact.senderAvatarUrl}
-                        alt="Sender"
-                        className="w-full h-full object-cover"
-                        crossOrigin="anonymous"
-                      />
-                    ) : (
-                      <div className="w-full h-full bg-cyan-700 flex items-center justify-center text-white font-bold text-sm">
-                        {contact.senderName.charAt(0) || 'Me'}
-                      </div>
-                    )}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <span className="text-[10px] text-cyan-400 uppercase font-mono tracking-wider block">
-                      Person A (Sender)
-                    </span>
-                    <span className="text-xs font-semibold text-zinc-100 truncate block">
-                      {contact.senderName}
-                    </span>
-                  </div>
-                </button>
-              </div>
-
-              {/* Name Editor Inputs */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-zinc-300 mb-1">
-                    Contact Name (Person B - Header)
-                  </label>
-                  <input
-                    type="text"
-                    value={contact.contactName}
-                    onChange={(e) => onChangeContact({ ...contact, contactName: e.target.value })}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-zinc-300 mb-1">
-                    Sender Name (Person A - Me)
-                  </label>
-                  <input
-                    type="text"
-                    value={contact.senderName}
-                    onChange={(e) => onChangeContact({ ...contact, senderName: e.target.value })}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-cyan-500"
-                  />
-                </div>
-              </div>
-
-              {/* Avatar Categories */}
-              <div className="space-y-3 pt-3 border-t border-zinc-800">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-zinc-200">
-                    Avatar Library for:{' '}
-                    <strong className={activePersonTab === 'B' ? 'text-emerald-400' : 'text-cyan-400'}>
-                      {activePersonTab === 'B' ? contact.contactName : contact.senderName}
-                    </strong>
-                  </span>
-                </div>
-
-                {/* Filter tabs */}
-                <div className="flex items-center gap-2 bg-zinc-950 p-1 rounded-xl border border-zinc-800 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => setAvatarCategory('arabic')}
-                    className={`flex-1 py-1.5 px-2 rounded-lg font-medium transition-all ${
-                      avatarCategory === 'arabic'
-                        ? 'bg-emerald-600 text-white shadow-xs'
-                        : 'text-zinc-400 hover:text-zinc-200'
-                    }`}
-                  >
-                    🇸🇦 Arabic Culture
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAvatarCategory('cartoon')}
-                    className={`flex-1 py-1.5 px-2 rounded-lg font-medium transition-all ${
-                      avatarCategory === 'cartoon'
-                        ? 'bg-amber-600 text-white shadow-xs'
-                        : 'text-zinc-400 hover:text-zinc-200'
-                    }`}
-                  >
-                    🎭 Cartoony & Funny
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAvatarCategory('realistic')}
-                    className={`flex-1 py-1.5 px-2 rounded-lg font-medium transition-all ${
-                      avatarCategory === 'realistic'
-                        ? 'bg-zinc-800 text-zinc-100 shadow-xs'
-                        : 'text-zinc-400 hover:text-zinc-200'
-                    }`}
-                  >
-                    📸 Photos
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAvatarCategory('custom')}
-                    className={`flex-1 py-1.5 px-2 rounded-lg font-medium transition-all ${
-                      avatarCategory === 'custom'
-                        ? 'bg-zinc-800 text-cyan-400 shadow-xs'
-                        : 'text-zinc-400 hover:text-zinc-200'
-                    }`}
-                  >
-                    🎨 Custom
-                  </button>
-                </div>
-
-                {/* Avatars Grid */}
-                {avatarCategory === 'arabic' && (
-                  <div className="grid grid-cols-3 gap-2.5">
-                    {ARABIC_AVATARS.map((item) => {
-                      const isSelected = currentSelectedUrl === item.url;
-                      return (
-                        <button
-                          key={item.id}
-                          type="button"
-                          onClick={() => handleSelectPreset(item)}
-                          className={`p-2.5 rounded-xl border flex flex-col items-center gap-1.5 text-center transition-all ${
-                            isSelected
-                              ? 'border-emerald-500 bg-emerald-950/30 ring-1 ring-emerald-500'
-                              : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
-                          }`}
-                        >
-                          <div className="relative w-12 h-12 rounded-full overflow-hidden border border-zinc-700">
-                            <img src={item.url} alt={item.name} className="w-full h-full object-cover" />
-                            {isSelected && (
-                              <div className="absolute inset-0 bg-emerald-600/40 flex items-center justify-center text-white">
-                                <Check className="w-4 h-4 stroke-[3]" />
-                              </div>
-                            )}
-                          </div>
-                          <span className="text-[11px] font-semibold text-zinc-200 truncate w-full">
-                            {item.name}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {avatarCategory === 'cartoon' && (
-                  <div className="grid grid-cols-3 gap-2.5">
-                    {CARTOON_AVATARS.map((item) => {
-                      const isSelected = currentSelectedUrl === item.url;
-                      return (
-                        <button
-                          key={item.id}
-                          type="button"
-                          onClick={() => handleSelectPreset(item)}
-                          className={`p-2.5 rounded-xl border flex flex-col items-center gap-1.5 text-center transition-all ${
-                            isSelected
-                              ? 'border-amber-500 bg-amber-950/30 ring-1 ring-amber-500'
-                              : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
-                          }`}
-                        >
-                          <div className="relative w-12 h-12 rounded-full overflow-hidden border border-zinc-700">
-                            <img src={item.url} alt={item.name} className="w-full h-full object-cover" />
-                            {isSelected && (
-                              <div className="absolute inset-0 bg-amber-600/40 flex items-center justify-center text-white">
-                                <Check className="w-4 h-4 stroke-[3]" />
-                              </div>
-                            )}
-                          </div>
-                          <span className="text-[11px] font-semibold text-zinc-200 truncate w-full">
-                            {item.name}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {avatarCategory === 'realistic' && (
-                  <div className="grid grid-cols-3 gap-2.5">
-                    {REALISTIC_AVATARS.map((item) => {
-                      const isSelected = currentSelectedUrl === item.url;
-                      return (
-                        <button
-                          key={item.id}
-                          type="button"
-                          onClick={() => handleSelectPreset(item)}
-                          className={`p-2.5 rounded-xl border flex flex-col items-center gap-1.5 text-center transition-all ${
-                            isSelected
-                              ? 'border-cyan-500 bg-cyan-950/30 ring-1 ring-cyan-500'
-                              : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
-                          }`}
-                        >
-                          <div className="relative w-12 h-12 rounded-full overflow-hidden border border-zinc-700">
-                            <img src={item.url} alt={item.name} className="w-full h-full object-cover" crossOrigin="anonymous" />
-                            {isSelected && (
-                              <div className="absolute inset-0 bg-cyan-600/40 flex items-center justify-center text-white">
-                                <Check className="w-4 h-4 stroke-[3]" />
-                              </div>
-                            )}
-                          </div>
-                          <span className="text-[11px] font-semibold text-zinc-200 truncate w-full">
-                            {item.name}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {avatarCategory === 'custom' && (
-                  <div className="p-4 bg-zinc-950 border border-zinc-800 rounded-xl space-y-3">
-                    <div className="flex items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={() => fileInputRef.current?.click()}
-                        className="flex items-center gap-2 text-xs font-semibold px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
-                      >
-                        <Upload className="w-4 h-4" />
-                        <span>Upload From Device</span>
-                      </button>
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        accept="image/*"
-                        onChange={handleFileUpload}
-                        className="hidden"
-                      />
-                      <span className="text-xs text-zinc-400">Supports PNG, JPG, GIF, SVG</span>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs text-zinc-400 mb-1">
-                        Or Paste Web Image URL:
-                      </label>
-                      <input
-                        type="url"
-                        value={currentSelectedUrl}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          if (activePersonTab === 'B') {
-                            onChangeContact({ ...contact, avatarUrl: val });
-                          } else {
-                            onChangeContact({ ...contact, senderAvatarUrl: val });
-                          }
-                        }}
-                        placeholder="https://example.com/avatar.png"
-                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-100"
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* TAB 2: ANDROID DEVICE & NAVIGATION */}
-          {activeTab === 'device' && (
-            <div className="space-y-4">
-              <h3 className="text-xs font-semibold text-zinc-300">Choose Android Hardware Model</h3>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  onClick={() => onChangeContact({ ...contact, androidDevice: 'samsung' })}
-                  className={`p-3.5 rounded-xl border text-left transition-all ${
-                    contact.androidDevice === 'samsung'
-                      ? 'border-emerald-500 bg-emerald-950/20 ring-1 ring-emerald-500'
-                      : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-semibold text-zinc-100">Samsung Galaxy S24 Ultra</span>
-                    {contact.androidDevice === 'samsung' && <Check className="w-4 h-4 text-emerald-400" />}
-                  </div>
-                  <p className="text-xs text-zinc-400 mt-1">
-                    Sharp titanium chassis, One UI status icons, center punch-hole camera
-                  </p>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => onChangeContact({ ...contact, androidDevice: 'xiaomi' })}
-                  className={`p-3.5 rounded-xl border text-left transition-all ${
-                    contact.androidDevice === 'xiaomi'
-                      ? 'border-cyan-500 bg-cyan-950/20 ring-1 ring-cyan-500'
-                      : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-semibold text-zinc-100">Xiaomi 17 Pro</span>
-                    {contact.androidDevice === 'xiaomi' && <Check className="w-4 h-4 text-cyan-400" />}
-                  </div>
-                  <p className="text-xs text-zinc-400 mt-1">
-                    Curved aerodynamic frame, HyperOS layout, micro punch-hole camera
-                  </p>
-                </button>
-              </div>
-
-              <div className="pt-3 border-t border-zinc-800 space-y-2">
-                <h3 className="text-xs font-semibold text-zinc-300">Android Navigation Style</h3>
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => onChangeContact({ ...contact, navStyle: 'gestures' })}
-                    className={`p-3 rounded-xl border text-left transition-all ${
-                      contact.navStyle === 'gestures'
-                        ? 'border-emerald-500 bg-emerald-950/20 ring-1 ring-emerald-500'
-                        : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
-                    }`}
-                  >
-                    <span className="text-xs font-semibold text-zinc-100 block">Gesture Line (Modern)</span>
-                    <span className="text-[11px] text-zinc-400 mt-0.5 block">Minimal swipe bar pill</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => onChangeContact({ ...contact, navStyle: 'buttons' })}
-                    className={`p-3 rounded-xl border text-left transition-all ${
-                      contact.navStyle === 'buttons'
-                        ? 'border-emerald-500 bg-emerald-950/20 ring-1 ring-emerald-500'
-                        : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
-                    }`}
-                  >
-                    <span className="text-xs font-semibold text-zinc-100 block">3-Button Navigation</span>
-                    <span className="text-[11px] text-zinc-400 mt-0.5 block">Classic (||| ▢ &lt;)</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 3: STATUS & SYSTEM CLOCK */}
-          {activeTab === 'status' && (
-            <div className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-zinc-300 mb-1">
-                  WhatsApp Contact Subtitle Status
-                </label>
-                <select
-                  value={contact.statusMode}
-                  onChange={(e) => onChangeContact({ ...contact, statusMode: e.target.value as any })}
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-200"
-                >
-                  <option value="online">online</option>
-                  <option value="typing">typing...</option>
-                  <option value="lastSeen">last seen recently</option>
-                  <option value="custom">Custom Text...</option>
-                </select>
-
-                {contact.statusMode === 'custom' && (
-                  <input
-                    type="text"
-                    value={contact.customStatusText}
-                    onChange={(e) => onChangeContact({ ...contact, customStatusText: e.target.value })}
-                    placeholder="e.g. في المجلس ☕️"
-                    className="mt-2 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-zinc-100"
-                  />
-                )}
-              </div>
-
-              <div className="grid grid-cols-2 gap-4 pt-3 border-t border-zinc-800">
-                <div>
-                  <label className="block text-xs font-medium text-zinc-300 mb-1 flex items-center gap-1.5">
-                    <Clock className="w-3.5 h-3.5 text-zinc-400" />
-                    Android Clock Time
-                  </label>
-                  <input
-                    type="text"
-                    value={contact.phoneTime}
-                    onChange={(e) => onChangeContact({ ...contact, phoneTime: e.target.value })}
-                    placeholder="09:41"
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-100"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-zinc-300 mb-1 flex items-center gap-1.5">
-                    <BatteryCharging className="w-3.5 h-3.5 text-zinc-400" />
-                    Battery Level: {contact.batteryLevel}%
-                  </label>
-                  <input
-                    type="range"
-                    min="5"
-                    max="100"
-                    value={contact.batteryLevel}
-                    onChange={(e) => onChangeContact({ ...contact, batteryLevel: Number(e.target.value) })}
-                    className="w-full mt-2 accent-emerald-500"
-                  />
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 4: PLAYBACK & TIMING */}
-          {activeTab === 'playback' && (
-            <div className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-zinc-300 mb-2">
-                  Playback & Typing Speed Multiplier
-                </label>
-                <div className="grid grid-cols-4 gap-2">
-                  {[0.75, 1, 1.5, 2].map((spd) => (
-                    <button
-                      key={spd}
-                      type="button"
-                      onClick={() => onChangeAnimSettings({ ...animSettings, speedMultiplier: spd })}
-                      className={`py-2 px-3 rounded-lg text-xs font-semibold border transition-all ${
-                        animSettings.speedMultiplier === spd
-                          ? 'border-emerald-500 bg-emerald-950/40 text-emerald-400'
-                          : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:bg-zinc-800'
-                      }`}
-                    >
-                      {spd}x Speed
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="pt-3 border-t border-zinc-800 flex items-center justify-between">
-                <div>
-                  <span className="text-xs font-semibold text-zinc-200 block">Loop Playback</span>
-                  <span className="text-[11px] text-zinc-400 block">
-                    Automatically replay chat animation from beginning
-                  </span>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={animSettings.loop}
-                  onChange={(e) => onChangeAnimSettings({ ...animSettings, loop: e.target.checked })}
-                  className="w-4 h-4 accent-emerald-500 cursor-pointer"
-                />
-              </div>
-
-              <div className="pt-3 border-t border-zinc-800 flex items-center justify-between">
-                <div>
-                  <span className="text-xs font-semibold text-zinc-200 block">Audio & Sound FX</span>
-                  <span className="text-[11px] text-zinc-400 block">
-                    Play WhatsApp message chimes and typing sounds during animation
-                  </span>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={Boolean(animSettings.soundEffectsEnabled)}
-                  onChange={(e) =>
-                    onChangeAnimSettings({
-                      ...animSettings,
-                      soundEffectsEnabled: e.target.checked,
-                    })
-                  }
-                  className="w-4 h-4 accent-emerald-500 cursor-pointer"
-                />
-              </div>
-            </div>
-          )}
-
-          {/* TAB 5: THEME */}
-          {activeTab === 'theme' && (
-            <div className="space-y-4">
-              <h3 className="text-xs font-semibold text-zinc-300">WhatsApp Theme Color</h3>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (theme.mode !== 'dark') onToggleTheme();
-                  }}
-                  className={`p-4 rounded-xl border text-left transition-all ${
-                    theme.mode === 'dark'
-                      ? 'border-emerald-500 bg-emerald-950/20 ring-1 ring-emerald-500'
-                      : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
-                      <Moon className="w-4 h-4 text-cyan-400" />
-                       Dark Mode
-                    </span>
-                    {theme.mode === 'dark' && <Check className="w-4 h-4 text-emerald-400" />}
-                  </div>
-                  <div className="flex items-center gap-1.5 mt-2">
-                    <span className="w-4 h-4 rounded-full bg-[#111b21] border border-zinc-700" />
-                    <span className="w-4 h-4 rounded-full bg-[#005c4b]" />
-                    <span className="w-4 h-4 rounded-full bg-[#202c33]" />
-                  </div>
-                  <p className="text-[11px] text-zinc-400 mt-2">
-                    Original WhatsApp Dark Mode (#111b21 & #005c4b)
-                  </p>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (theme.mode !== 'light') onToggleTheme();
-                  }}
-                  className={`p-4 rounded-xl border text-left transition-all ${
-                    theme.mode === 'light'
-                      ? 'border-emerald-500 bg-emerald-950/20 ring-1 ring-emerald-500'
-                      : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
-                      <Sun className="w-4 h-4 text-amber-400" />
-                      Light Mode
-                    </span>
-                    {theme.mode === 'light' && <Check className="w-4 h-4 text-emerald-400" />}
-                  </div>
-                  <div className="flex items-center gap-1.5 mt-2">
-                    <span className="w-4 h-4 rounded-full bg-[#efeae2] border border-zinc-400" />
-                    <span className="w-4 h-4 rounded-full bg-[#d9fdd3] border border-zinc-300" />
-                    <span className="w-4 h-4 rounded-full bg-[#008069]" />
-                  </div>
-                  <p className="text-[11px] text-zinc-400 mt-2">
-                    Original WhatsApp Light Mode (#efeae2 & #d9fdd3)
-                  </p>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 6: EXPORT FORMAT & QUALITY */}
-          {activeTab === 'export' && (
-            <div className="space-y-5">
-              <div>
-                <h3 className="text-xs font-semibold text-zinc-300 mb-2">Default Export Format</h3>
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => onChangeExportFormat?.('mp4')}
-                    className={`p-3.5 rounded-xl border text-left transition-all ${
-                      exportFormat === 'mp4'
-                        ? 'border-emerald-500 bg-emerald-950/20 ring-1 ring-emerald-500'
-                        : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
-                        <Film className="w-4 h-4 text-emerald-400" />
-                        MP4 Video
-                      </span>
-                      {exportFormat === 'mp4' && <Check className="w-4 h-4 text-emerald-400" />}
-                    </div>
-                    <p className="text-[11px] text-zinc-400 mt-1">
-                      Smooth 60 FPS video recording. Ideal for Reels, Shorts, and video players.
-                    </p>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => onChangeExportFormat?.('gif')}
-                    className={`p-3.5 rounded-xl border text-left transition-all ${
-                      exportFormat === 'gif'
-                        ? 'border-cyan-500 bg-cyan-950/20 ring-1 ring-cyan-500'
-                        : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
-                        <ImageIcon className="w-4 h-4 text-cyan-400" />
-                        Animated GIF
-                      </span>
-                      {exportFormat === 'gif' && <Check className="w-4 h-4 text-cyan-400" />}
-                    </div>
-                    <p className="text-[11px] text-zinc-400 mt-1">
-                      Lightweight looping graphic. Perfect for forum embeds, messaging, and docs.
-                    </p>
-                  </button>
-                </div>
-              </div>
-
-              <div className="pt-3 border-t border-zinc-800">
-                <h3 className="text-xs font-semibold text-zinc-300 mb-2">Quality & Resolution Scaling</h3>
-                <div className="grid grid-cols-2 gap-3">
-                  {[
-                    { key: '1080p', label: '1080p Full HD', desc: '1080 × 1920 (Highest detail & clarity)' },
-                    { key: '720p', label: '720p HD', desc: '720 × 1280 (Recommended balance)' },
-                    { key: '480p', label: '480p SD', desc: '480 × 854 (Fast & compact file size)' },
-                    { key: '360p', label: '360p Low', desc: '360 × 640 (Minimal bandwidth / ultra light)' },
-                  ].map((item) => (
-                    <button
-                      key={item.key}
-                      type="button"
-                      onClick={() => onChangeExportResolution?.(item.key as ExportResolution)}
-                      className={`p-3 rounded-xl border text-left transition-all ${
-                        exportResolution === item.key
-                          ? 'border-emerald-500 bg-emerald-950/20 ring-1 ring-emerald-500'
-                          : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-zinc-100">{item.label}</span>
-                        {exportResolution === item.key && (
-                          <Check className="w-3.5 h-3.5 text-emerald-400" />
-                        )}
-                      </div>
-                      <p className="text-[10.5px] text-zinc-400 mt-0.5">{item.desc}</p>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Modal Footer */}
-        <div className="px-6 py-3 border-t border-zinc-800 bg-zinc-950 flex items-center justify-end">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md transition-colors"
-          >
-            Done & Apply
-          </button>
+          {/* Footer Actions */}
+          <div className="flex items-center justify-between px-4 sm:px-6 py-3.5 bg-slate-900 border-t border-slate-800 shrink-0">
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-2 sm:px-4 sm:py-2 rounded-lg text-xs font-medium text-slate-300 hover:bg-slate-800 transition-colors flex items-center gap-1.5 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+              <span>Cancel</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleSave}
+              className="flex items-center gap-1.5 px-5 py-2 rounded-lg text-xs font-semibold text-white bg-blue-600 hover:bg-blue-500 shadow-md shadow-blue-600/20 transition-all cursor-pointer"
+            >
+              {savedSuccess ? (
+                <>
+                  <Check className="w-4 h-4 text-white" />
+                  <span>Saved!</span>
+                </>
+              ) : (
+                <>
+                  <Check className="w-4 h-4 text-white" />
+                  <span>Save Preferences</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+
+      {/* Step by step guide modal */}
+      <ApiInstructionsModal
+        isOpen={isGuideModalOpen}
+        onClose={() => setIsGuideModalOpen(false)}
+        selectedProviderId={provider}
+        onSelectProvider={(selectedId) => {
+          handleProviderChange(selectedId);
+        }}
+      />
+    </>
   );
 };

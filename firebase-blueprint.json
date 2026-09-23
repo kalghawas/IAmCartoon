@@ -1,0 +1,37 @@
+{
+  "entities": {
+    "UserProfile": {
+      "collection": "users",
+      "fields": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "provider": { "type": "string" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" },
+        "freeCreditsRemaining": { "type": "number" },
+        "purchasedCredits": { "type": "number" },
+        "lastMonthlyReset": { "type": "number" },
+        "unlockedImageIds": { "type": "array" }
+      }
+    },
+    "CharacterCreation": {
+      "collection": "users/{userId}/creations",
+      "fields": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "originalThumbnailUrl": { "type": "string" },
+        "artStyleId": { "type": "string" },
+        "artStyleName": { "type": "string" },
+        "poseId": { "type": "string" },
+        "poseLabel": { "type": "string" },
+        "seed": { "type": "number" },
+        "timestamp": { "type": "number" },
+        "expiresAt": { "type": "number" },
+        "isUnlocked": { "type": "boolean" }
+      }
+    }
+  }
+}

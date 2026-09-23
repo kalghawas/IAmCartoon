@@ -1,869 +1,764 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import {
-  AppThemeMode,
-  ChatThemeMode,
-  ContactSettings,
-  ParserConfig,
-  AnimationSettings,
-  ExportProgress,
-  ExportFormat,
-  ExportResolution,
-  TaggedLine,
-  UserSubscriptionState,
-  UserProfile,
-  CreationRecord,
-} from './types';
-import { THEME_COLORS } from './constants/themeColors';
-import { SAMPLE_TRANSCRIPTS } from './constants/sampleTranscripts';
-import {
-  analyzeRawTextToTaggedLines,
-  taggedLinesToRawText,
-  parseTaggedLinesToMessages,
-} from './utils/transcriptParser';
-import { exportChatMedia } from './utils/videoRecorder';
-import { preloadAvatar, preloadScreenshot } from './utils/canvasRenderer';
-import { playSentSound, playReceivedSound } from './utils/audioEffects';
-import {
-  loadSubscriptionState,
-  saveSubscriptionState,
-  recordGenerationUsage,
-} from './utils/monetization';
-import {
-  getCurrentUser,
-  saveUser,
-  saveCreationRecord,
-  saveUserPreferences,
-} from './utils/accountStore';
-
-import { WorkstationHeader } from './components/WorkstationHeader';
-import { TranscriptEditor } from './components/TranscriptEditor';
-import { PlaybackControls } from './components/PlaybackControls';
-import { PhoneMockup } from './components/PhoneMockup';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Header } from './components/Header';
+import { ControlsColumn } from './components/ControlsColumn';
+import { CanvasArea } from './components/CanvasArea';
+import { HistoryReel } from './components/HistoryReel';
+import { CropModal } from './components/CropModal';
 import { SettingsModal } from './components/SettingsModal';
-import { ExportModal } from './components/ExportModal';
-import { UpgradeModal } from './components/UpgradeModal';
+import { ShortcutsModal } from './components/ShortcutsModal';
+import { UnlockModal } from './components/UnlockModal';
 import { AuthModal } from './components/AuthModal';
-import { UserProfileModal } from './components/UserProfileModal';
-import { HelpModal } from './components/HelpModal';
-import { Smartphone, FileEdit, MessageSquare } from 'lucide-react';
+import {
+  ArtStyle,
+  PoseOption,
+  WardrobeOption,
+  ExpressionOption,
+  HistoryItem,
+  GenerationStep,
+  AppSettings,
+  CropSettings,
+  UserCreditState,
+  UserProfile,
+  OfflineModeSettings,
+  OfflineDebugLayers,
+  DailyUsageState
+} from './types';
+import { ART_STYLES, POSES, WARDROBES, EXPRESSIONS, DEFAULT_SYSTEM_PROMPT } from './utils/constants';
+import { generateCartoonCharacter } from './utils/geminiService';
+import { DEFAULT_OFFLINE_SETTINGS } from './utils/offlineEngine';
+import {
+  loadUserCredits,
+  saveUserCredits,
+  consumeCredit,
+  downloadImageWithWatermarkOption
+} from './utils/creditManager';
+import { getCurrentUser, setCurrentUser, syncUserCreditsToProfile } from './utils/authManager';
+import { saveCreationToFirestore, loadCreationsFromFirestore } from './utils/firebase';
+import { CreatorAdminModal } from './components/CreatorAdminModal';
+import { fetchDailyUsage, checkIsCreator } from './utils/providerApi';
+
+const SETTINGS_STORAGE_KEY = 'iam_cartoon_studio_settings_v2';
+const HISTORY_STORAGE_KEY = 'iam_cartoon_studio_history_v2';
+const OFFLINE_SETTINGS_STORAGE_KEY = 'iam_cartoon_offline_settings_v1';
 
 export default function App() {
-  // Current Signed-In User Profile (Google or Email)
-  const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => getCurrentUser());
-  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
-  const [isProfileModalOpen, setIsProfileModalOpen] = useState<boolean>(false);
+  // Active User Profile Authentication
+  const [currentUser, setLocalCurrentUser] = useState<UserProfile | null>(() => getCurrentUser());
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
-  // User Subscription / Monetization State (Synced with currentUser if logged in)
-  const [subscription, setSubscription] = useState<UserSubscriptionState>(() => {
-    const user = getCurrentUser();
-    if (user?.subscription) return user.subscription;
-    return loadSubscriptionState();
-  });
-  const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState<boolean>(false);
+  // Free Tier Daily Allowance State & Creator Admin State
+  const [isFreeTier, setIsFreeTier] = useState<boolean>(true);
+  const [dailyUsage, setDailyUsage] = useState<DailyUsageState | undefined>();
+  const [isCreator, setIsCreator] = useState<boolean>(false);
+  const [isCreatorAdminOpen, setIsCreatorAdminOpen] = useState<boolean>(false);
 
-  // When user logs in or updates, sync subscription
-  const handleAuthSuccess = useCallback((user: UserProfile) => {
-    setCurrentUser(user);
-    if (user.subscription) {
-      setSubscription(user.subscription);
-      saveSubscriptionState(user.subscription);
-    }
-  }, []);
-
-  const handleUpdateUser = useCallback((user: UserProfile | null) => {
-    setCurrentUser(user);
-    if (user?.subscription) {
-      setSubscription(user.subscription);
-      saveSubscriptionState(user.subscription);
-    }
-  }, []);
-
-  // Update subscription handler (syncs to account store as well)
-  const handleUpdateSubscription = useCallback(
-    (newSub: UserSubscriptionState) => {
-      setSubscription(newSub);
-      saveSubscriptionState(newSub);
-      if (currentUser) {
-        const updated = { ...currentUser, subscription: newSub };
-        setCurrentUser(updated);
-        saveUser(updated);
-      }
-    },
-    [currentUser]
-  );
-
-  // Web App Theme (Whole site: Dark vs Light)
-  const [appThemeMode, setAppThemeMode] = useState<AppThemeMode>(() => {
+  // Offline Mode Fine-tuning Settings (zero AI, 100% browser-local)
+  const [offlineSettings, setOfflineSettings] = useState<OfflineModeSettings>(() => {
     try {
-      const saved = localStorage.getItem('iamwhatsapp_app_theme');
-      return (saved === 'light' || saved === 'dark') ? saved : 'dark';
-    } catch {
-      return 'dark';
+      const saved = localStorage.getItem(OFFLINE_SETTINGS_STORAGE_KEY);
+      if (saved) return { ...DEFAULT_OFFLINE_SETTINGS, ...JSON.parse(saved) };
+    } catch (e) {
+      console.error(e);
     }
+    return DEFAULT_OFFLINE_SETTINGS;
   });
 
-  const handleToggleAppTheme = useCallback(() => {
-    setAppThemeMode((prev) => {
-      const next = prev === 'dark' ? 'light' : 'dark';
-      try {
-        localStorage.setItem('iamwhatsapp_app_theme', next);
-      } catch {}
-      return next;
-    });
-  }, []);
-
-  // WhatsApp Chat Theme (Dark Mode vs Light Mode inside WhatsApp phone & canvas)
-  const [chatThemeMode, setChatThemeMode] = useState<ChatThemeMode>('dark');
-  const chatTheme = THEME_COLORS[chatThemeMode];
-
-  const handleToggleChatTheme = useCallback(() => {
-    setChatThemeMode((prev) => (prev === 'dark' ? 'light' : 'dark'));
-  }, []);
-
-  // Default sample
-  const defaultSample = SAMPLE_TRANSCRIPTS[0];
-
-  // Parser config
-  const [parserConfig, setParserConfig] = useState<ParserConfig>({
-    prefixA: defaultSample.prefixA,
-    prefixB: defaultSample.prefixB,
-  });
-
-  // Profile & Contact Settings
-  const [contact, setContact] = useState<ContactSettings>({
-    contactName: defaultSample.personBName,
-    senderName: defaultSample.personAName,
-    avatarUrl: defaultSample.avatarUrl,
-    senderAvatarUrl: defaultSample.senderAvatarUrl || '',
-    statusMode: 'online',
-    customStatusText: 'online',
-    phoneTime: '09:41',
-    batteryLevel: 92,
-    wifiStrength: 3,
-    androidDevice: 'samsung',
-    navStyle: 'gestures',
-  });
-
-  // Raw and Tagged transcript state
-  const [rawTranscript, setRawTranscript] = useState<string>(defaultSample.rawText);
-  const [taggedLines, setTaggedLines] = useState<TaggedLine[]>(() =>
-    analyzeRawTextToTaggedLines(
-      defaultSample.rawText,
-      { prefixA: defaultSample.prefixA, prefixB: defaultSample.prefixB },
-      defaultSample.personAName,
-      defaultSample.personBName
-    )
-  );
-
-  // Applied Messages in WhatsApp Window (loaded on demand via "Make bubbles")
-  const [appliedMessages, setAppliedMessages] = useState(() =>
-    parseTaggedLinesToMessages(
-      analyzeRawTextToTaggedLines(
-        defaultSample.rawText,
-        { prefixA: defaultSample.prefixA, prefixB: defaultSample.prefixB },
-        defaultSample.personAName,
-        defaultSample.personBName
-      ),
-      defaultSample.personAName,
-      defaultSample.personBName,
-      '10:42 AM',
-      1
-    )
-  );
-
-  // Track applied hash to determine pending changes
-  const [appliedHash, setAppliedHash] = useState<string>(() =>
-    JSON.stringify(
-      analyzeRawTextToTaggedLines(
-        defaultSample.rawText,
-        { prefixA: defaultSample.prefixA, prefixB: defaultSample.prefixB },
-        defaultSample.personAName,
-        defaultSample.personBName
-      )
-    )
-  );
-
-  // Check if editor has unsaved changes that need "Make bubbles"
-  const currentHash = useMemo(() => JSON.stringify(taggedLines), [taggedLines]);
-  const hasPendingChanges = currentHash !== appliedHash;
-
-  // Make bubbles in-button generation state
-  const [isBubblesGenerating, setIsBubblesGenerating] = useState<boolean>(false);
-
-  // Mobile / Tablet Tab Switcher ('editor' | 'preview')
-  const [mobileTab, setMobileTab] = useState<'editor' | 'preview'>('editor');
-
-  // Animation settings (Muted by default to avoid annoyance, toggleable via 1-click icon)
-  const [animSettings, setAnimSettings] = useState<AnimationSettings>({
-    speedMultiplier: 1,
-    loop: true,
-    baseTypingSpeedCpm: 40,
-    pauseBetweenMessagesMs: 900,
-    showTypingBubble: true,
-    typewriterEnabled: false,
-    soundEffectsEnabled: false,
-  });
-
-  // Download counter state
-  const [downloadCount, setDownloadCount] = useState<number>(() => {
+  const handleOfflineSettingsChange = (newSettings: OfflineModeSettings) => {
+    setOfflineSettings(newSettings);
     try {
-      const saved = localStorage.getItem('iamwhatsapp_download_count');
-      return saved ? parseInt(saved, 10) : 0;
-    } catch {
-      return 0;
+      localStorage.setItem(OFFLINE_SETTINGS_STORAGE_KEY, JSON.stringify(newSettings));
+    } catch (e) {
+      console.error(e);
     }
-  });
-
-  const handleIncrementDownload = useCallback(() => {
-    setDownloadCount((prev) => {
-      const next = prev + 1;
-      try {
-        localStorage.setItem('iamwhatsapp_download_count', next.toString());
-      } catch {}
-      return next;
-    });
-  }, []);
-
-  // Settings modal open state
-  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
-
-  // Playback state
-  const [isPlaying, setIsPlaying] = useState<boolean>(true);
-  const [currentTimeMs, setCurrentTimeMs] = useState<number>(0);
-
-  // Export state (Dual formats: MP4 & GIF, Qualities: 1080p, 720p, 480p, 360p)
-  const [isExporting, setIsExporting] = useState<boolean>(false);
-  const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
-  const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
-  const [exportFormat, setExportFormat] = useState<ExportFormat>('mp4');
-  const [exportResolution, setExportResolution] = useState<ExportResolution>('1080p');
-  const abortControllerRef = useRef<AbortController | null>(null);
-
-  // Help modal state
-  const [isHelpModalOpen, setIsHelpModalOpen] = useState<boolean>(false);
-
-  // Preload initial avatars and images
-  useEffect(() => {
-    if (contact.avatarUrl) {
-      preloadAvatar(contact.avatarUrl);
-    }
-    if (contact.senderAvatarUrl) {
-      preloadAvatar(contact.senderAvatarUrl);
-    }
-  }, [contact.avatarUrl, contact.senderAvatarUrl]);
-
-  // Preload screenshot images whenever applied messages change
-  useEffect(() => {
-    appliedMessages.forEach((msg) => {
-      if (msg.hasImage && msg.imageUrl) {
-        preloadScreenshot(msg.imageUrl);
-      }
-    });
-  }, [appliedMessages]);
-
-  // Total animation duration in milliseconds
-  const totalDurationMs = useMemo(() => {
-    if (appliedMessages.length === 0) return 0;
-    return appliedMessages[appliedMessages.length - 1].endMs + 1200;
-  }, [appliedMessages]);
-
-  // Find active message index
-  const activeMessageIndex = useMemo(() => {
-    for (let i = 0; i < appliedMessages.length; i++) {
-      if (
-        currentTimeMs >= appliedMessages[i].startMs &&
-        currentTimeMs < appliedMessages[i].endMs
-      ) {
-        return i;
-      }
-    }
-    return -1;
-  }, [appliedMessages, currentTimeMs]);
-
-  // Sound effect tracking for message dispatch moments
-  const triggeredSoundIndexRef = useRef<number>(-1);
-
-  useEffect(() => {
-    if (!animSettings.soundEffectsEnabled || !isPlaying) return;
-
-    if (currentTimeMs === 0) {
-      triggeredSoundIndexRef.current = -1;
-      return;
-    }
-
-    // Check if a message was just dispatched
-    for (let i = 0; i < appliedMessages.length; i++) {
-      const msg = appliedMessages[i];
-      const sendMomentMs = msg.startMs + msg.typingDelayMs + msg.typingDurationMs;
-
-      if (currentTimeMs >= sendMomentMs && triggeredSoundIndexRef.current < i) {
-        triggeredSoundIndexRef.current = i;
-        if (msg.sender === 'A') {
-          playSentSound();
-        } else {
-          playReceivedSound();
-        }
-        break;
-      }
-    }
-  }, [currentTimeMs, isPlaying, appliedMessages, animSettings.soundEffectsEnabled]);
-
-  // Playback animation ticker loop
-  const lastTickTimeRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    let animationFrameId: number;
-
-    const tick = (now: number) => {
-      if (lastTickTimeRef.current !== null && isPlaying && totalDurationMs > 0) {
-        const delta = (now - lastTickTimeRef.current) * animSettings.speedMultiplier;
-        setCurrentTimeMs((prev) => {
-          const next = prev + delta;
-          if (next >= totalDurationMs) {
-            if (animSettings.loop) {
-              triggeredSoundIndexRef.current = -1;
-              return 0;
-            } else {
-              setIsPlaying(false);
-              return totalDurationMs;
-            }
-          }
-          return next;
-        });
-      }
-      lastTickTimeRef.current = now;
-      animationFrameId = requestAnimationFrame(tick);
-    };
-
-    animationFrameId = requestAnimationFrame(tick);
-    return () => {
-      cancelAnimationFrame(animationFrameId);
-      lastTickTimeRef.current = null;
-    };
-  }, [isPlaying, totalDurationMs, animSettings.speedMultiplier, animSettings.loop]);
-
-  // Keyboard shortcut: Spacebar to toggle Play/Pause
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (
-        e.code === 'Space' &&
-        document.activeElement?.tagName !== 'TEXTAREA' &&
-        document.activeElement?.tagName !== 'INPUT'
-      ) {
-        e.preventDefault();
-        setIsPlaying((prev) => !prev);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
-  // Handlers
-  const handleTogglePlay = useCallback(() => {
-    if (currentTimeMs >= totalDurationMs && totalDurationMs > 0) {
-      triggeredSoundIndexRef.current = -1;
-      setCurrentTimeMs(0);
-      setIsPlaying(true);
-    } else {
-      setIsPlaying((prev) => !prev);
-    }
-  }, [currentTimeMs, totalDurationMs]);
-
-  const handleReset = useCallback(() => {
-    triggeredSoundIndexRef.current = -1;
-    setCurrentTimeMs(0);
-    setIsPlaying(true);
-  }, []);
-
-  const handleSeek = useCallback((timeMs: number) => {
-    triggeredSoundIndexRef.current = -1;
-    setCurrentTimeMs(timeMs);
-  }, []);
-
-  // Update tagged lines from editor
-  const handleUpdateTaggedLines = useCallback(
-    (lines: TaggedLine[]) => {
-      setTaggedLines(lines);
-      const raw = taggedLinesToRawText(lines, parserConfig);
-      setRawTranscript(raw);
-    },
-    [parserConfig]
-  );
-
-  // Update raw transcript from raw text mode
-  const handleUpdateRawTranscript = useCallback((val: string) => {
-    setRawTranscript(val);
-  }, []);
-
-  // Update speaker names if auto-detected from file upload
-  const handleUpdateSpeakerNames = useCallback((nameA: string, nameB: string) => {
-    setContact((prev) => ({
-      ...prev,
-      senderName: nameA,
-      contactName: nameB,
-    }));
-  }, []);
-
-  // Handler when clicking "Make Bubbles!" button (Respects action quota and triggers upgrade modal if depleted)
-  const handleTriggerMakeBubbles = () => {
-    if (isBubblesGenerating) return;
-
-    // Check generation usage quota
-    const quota = recordGenerationUsage(subscription, (newSub) => {
-      handleUpdateSubscription(newSub);
-    });
-
-    if (!quota.allowed) {
-      setIsUpgradeModalOpen(true);
-      return;
-    }
-
-    setIsBubblesGenerating(true);
-
-    setTimeout(() => {
-      const newMessages = parseTaggedLinesToMessages(
-        taggedLines,
-        contact.senderName,
-        contact.contactName,
-        '10:42 AM',
-        animSettings.speedMultiplier
-      );
-
-      setAppliedMessages(newMessages);
-      setAppliedHash(JSON.stringify(taggedLines));
-      triggeredSoundIndexRef.current = -1;
-      setCurrentTimeMs(0);
-      setIsPlaying(true);
-      setIsBubblesGenerating(false);
-
-      // Take user to the WhatsApp View outcome screen
-      setMobileTab('preview');
-      const studioElem = document.getElementById('whatsapp-view-section');
-      if (studioElem) {
-        studioElem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      }
-    }, 550);
   };
 
-  // Restore previous creation from 30-Day History
-  const handleLoadCreation = useCallback((record: CreationRecord) => {
-    setRawTranscript(record.rawTranscript);
-    setTaggedLines(record.taggedLines);
-    if (record.contactSnapshot) {
-      setContact(record.contactSnapshot);
+  const handleToggleOfflineMode = (offline: boolean) => {
+    setSettings((prev) => {
+      const next = { ...prev, useMockMode: offline };
+      try {
+        localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(next));
+      } catch (e) {
+        console.error(e);
+      }
+      return next;
+    });
+    if (offline) {
+      showToast('⚡ Switched to Offline Mode (100% local, zero upload)');
+    } else {
+      showToast('✨ Switched to AI Studio Mode');
     }
-    if (record.themeModeSnapshot) {
-      setChatThemeMode(record.themeModeSnapshot);
-    }
-    if (record.format) {
-      setExportFormat(record.format);
-    }
-    if (record.resolution) {
-      setExportResolution(record.resolution);
-    }
+  };
 
-    const newMsgs = parseTaggedLinesToMessages(
-      record.taggedLines,
-      record.personAName,
-      record.personBName,
-      '10:42 AM',
-      1
-    );
-    setAppliedMessages(newMsgs);
-    setAppliedHash(JSON.stringify(record.taggedLines));
-    triggeredSoundIndexRef.current = -1;
-    setCurrentTimeMs(0);
-    setIsPlaying(true);
-    setMobileTab('preview');
+  // Offline Service Worker readiness
+  const [isOfflineReady, setIsOfflineReady] = useState<boolean>(true);
+
+  // Synchronize Daily Free Tier Usage with Server
+  const refreshDailyUsage = useCallback(async () => {
+    try {
+      const usage = await fetchDailyUsage(currentUser?.id);
+      setDailyUsage(usage);
+    } catch (e) {
+      console.warn('Failed to load daily usage:', e);
+    }
+  }, [currentUser]);
+
+  useEffect(() => {
+    refreshDailyUsage();
+    checkIsCreator(currentUser?.email).then((res) => setIsCreator(res.isCreator));
+  }, [currentUser, refreshDailyUsage]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker
+        .register('/sw.js')
+        .then((reg) => {
+          if (reg.active) {
+            setIsOfflineReady(true);
+          }
+          reg.addEventListener('updatefound', () => {
+            const installing = reg.installing;
+            if (installing) {
+              installing.onstatechange = () => {
+                if (installing.state === 'activated') {
+                  setIsOfflineReady(true);
+                }
+              };
+            }
+          });
+        })
+        .catch((err) => {
+          console.warn('Service Worker registration note:', err);
+          setIsOfflineReady(true);
+        });
+
+      navigator.serviceWorker.addEventListener('message', (event) => {
+        if (event.data && event.data.type === 'OFFLINE_READY') {
+          setIsOfflineReady(true);
+        }
+      });
+    }
   }, []);
 
-  // Load sample transcript handler
-  const handleLoadSample = useCallback((sampleId: string) => {
-    const sample = SAMPLE_TRANSCRIPTS.find((s) => s.id === sampleId);
-    if (!sample) return;
-
-    setRawTranscript(sample.rawText);
-    const newConfig = {
-      prefixA: sample.prefixA,
-      prefixB: sample.prefixB,
+  // Application Settings
+  const [settings, setSettings] = useState<AppSettings>(() => {
+    try {
+      const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.model === 'imagen-3.0-generate-002' || !parsed.model || parsed.model.startsWith('gemini-1.5') || parsed.model.startsWith('gemini-2.0')) {
+          parsed.model = 'gemini-3.1-flash-image';
+        }
+        return parsed;
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    return {
+      provider: 'pollinations',
+      geminiApiKey: '',
+      useMockMode: false, // Default to live AI engine (Pollinations 100% Free) with offline avatar fallback
+      model: 'flux',
+      aspectRatio: '1:1',
+      systemPrompt: DEFAULT_SYSTEM_PROMPT
     };
-    setParserConfig(newConfig);
-    setContact((prev) => ({
-      ...prev,
-      contactName: sample.personBName,
-      senderName: sample.personAName,
-      avatarUrl: sample.avatarUrl,
-      senderAvatarUrl: sample.senderAvatarUrl || prev.senderAvatarUrl,
-    }));
+  });
 
-    const analyzed = analyzeRawTextToTaggedLines(
-      sample.rawText,
-      newConfig,
-      sample.personAName,
-      sample.personBName
-    );
-    setTaggedLines(analyzed);
+  // User Credit State (Monthly 3 Free Credits + Purchased Packs)
+  const [userCredits, setUserCredits] = useState<UserCreditState>(() => {
+    const active = getCurrentUser();
+    if (active && active.credits) return active.credits;
+    return loadUserCredits();
+  });
 
-    const newMsgs = parseTaggedLinesToMessages(
-      analyzed,
-      sample.personAName,
-      sample.personBName,
-      '10:42 AM',
-      1
-    );
-    setAppliedMessages(newMsgs);
-    setAppliedHash(JSON.stringify(analyzed));
-    triggeredSoundIndexRef.current = -1;
-    setCurrentTimeMs(0);
-    setIsPlaying(true);
-  }, []);
+  // Current Portrait Image State
+  const [currentImage, setCurrentImage] = useState<string | null>(null);
+  const [currentImageName, setCurrentImageName] = useState<string>('My Portrait');
 
-  // Auto-detect prefixes from transcript
-  const handleAutoDetectPrefixes = useCallback(() => {
-    const lines = rawTranscript
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean);
-    const prefixCounts: Record<string, number> = {};
+  // Customization Selections
+  const [selectedStyle, setSelectedStyle] = useState<ArtStyle>(ART_STYLES[0]);
+  const [selectedPose, setSelectedPose] = useState<PoseOption>(POSES[0]);
+  const [selectedWardrobe, setSelectedWardrobe] = useState<WardrobeOption>(WARDROBES[0]);
+  const [customWardrobeText, setCustomWardrobeText] = useState<string>('');
+  const [selectedExpression, setSelectedExpression] = useState<ExpressionOption>(EXPRESSIONS[0]);
 
-    for (const line of lines) {
-      const match = line.match(/^(\[?[a-zA-Z0-9\s_-]+\]?:?)/);
-      if (match) {
-        const p = match[1].trim();
-        prefixCounts[p] = (prefixCounts[p] || 0) + 1;
+  // Seed & Modifiers
+  const [seed, setSeed] = useState<number>(42891);
+  const [isSeedLocked, setIsSeedLocked] = useState<boolean>(true);
+  const [additionalNotes, setAdditionalNotes] = useState<string>('');
+
+  // Generated Canvas State
+  const [generatedImage, setGeneratedImage] = useState<string | null>(null);
+  const [activeHistoryId, setActiveHistoryId] = useState<string | null>(null);
+  const [debugLayers, setDebugLayers] = useState<OfflineDebugLayers | null>(null);
+
+  // Generation Progress State
+  const [isGenerating, setIsGenerating] = useState<boolean>(false);
+  const [generationStep, setGenerationStep] = useState<GenerationStep>({
+    step: 1,
+    label: 'Preparing...',
+    percentage: 0
+  });
+
+  // History Reel with 30-Day Auto Retention
+  const [history, setHistory] = useState<HistoryItem[]>(() => {
+    try {
+      const saved = localStorage.getItem(HISTORY_STORAGE_KEY);
+      if (saved) {
+        const parsed: HistoryItem[] = JSON.parse(saved);
+        const now = Date.now();
+        // Filter out items older than 30 days
+        return parsed.filter((item) => !item.expiresAt || item.expiresAt > now);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    return [];
+  });
+
+  // Responsive Mobile/Tablet Tab: 'canvas' | 'controls'
+  const [mobileTab, setMobileTab] = useState<'canvas' | 'controls'>('controls');
+
+  // Modals
+  const [isCropModalOpen, setIsCropModalOpen] = useState(false);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [isShortcutsModalOpen, setIsShortcutsModalOpen] = useState(false);
+  const [isUnlockModalOpen, setIsUnlockModalOpen] = useState(false);
+
+  // Notification Toast
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 3200);
+  };
+
+  // Persist Settings
+  const handleSaveSettings = (newSettings: AppSettings) => {
+    setSettings(newSettings);
+    try {
+      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(newSettings));
+    } catch (e) {
+      console.error(e);
+    }
+    showToast('Settings saved successfully');
+  };
+
+  // Persist History
+  useEffect(() => {
+    try {
+      localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history.slice(0, 20)));
+    } catch (e) {
+      console.error(e);
+    }
+  }, [history]);
+
+  // Seed Controls
+  const handleRandomizeSeed = () => {
+    const newSeed = Math.floor(Math.random() * 900000) + 100000;
+    setSeed(newSeed);
+    showToast(`Seed randomized: ${newSeed}`);
+  };
+
+  const handleToggleSeedLock = () => {
+    setIsSeedLocked((prev) => {
+      const next = !prev;
+      showToast(next ? 'Seed locked: Identity preserved' : 'Variation mode active');
+      return next;
+    });
+  };
+
+  // Crop Application
+  const handleApplyCrop = (croppedDataUrl: string, _cropSettings: CropSettings) => {
+    setCurrentImage(croppedDataUrl);
+    setCurrentImageName((name) => (name.includes('(Cropped)') ? name : `${name} (Cropped)`));
+    showToast('Portrait centered & cropped');
+  };
+
+  // Check if active image is unlocked
+  const isCurrentUnlocked = activeHistoryId
+    ? userCredits.unlockedImageIds.includes(activeHistoryId)
+    : false;
+
+  // Core Generation Trigger
+  const handleGenerate = useCallback(async () => {
+    if (isGenerating || !currentImage) return;
+
+    // Free Tier vs Paid Tier allowance checks
+    if (isFreeTier) {
+      if (dailyUsage?.usedToday) {
+        showToast("⚠️ You have used today's free AI generation. Resets daily or switch to Paid Tier.");
+        return;
+      }
+    } else {
+      // Paid Tier check (credits or user API key)
+      const hasCustomApiKey = Boolean(settings.geminiApiKey?.trim());
+      const totalAvailable =
+        userCredits.freeCreditsRemaining + userCredits.purchasedCredits;
+      if (!hasCustomApiKey && totalAvailable <= 0) {
+        setIsUnlockModalOpen(true);
+        showToast('⚠️ You have used your Paid Tier credits. Unlock more or provide an API key in settings.');
+        return;
       }
     }
 
-    const sorted = Object.entries(prefixCounts).sort((a, b) => b[1] - a[1]);
-    if (sorted.length >= 2) {
-      const pA = sorted[0][0].endsWith(':') ? sorted[0][0] : `${sorted[0][0]}:`;
-      const pB = sorted[1][0].endsWith(':') ? sorted[1][0] : `${sorted[1][0]}:`;
-      const newConfig = { prefixA: pA, prefixB: pB };
-      setParserConfig(newConfig);
+    // Automatically switch mobile view to canvas so user sees the result
+    setMobileTab('canvas');
+    setIsGenerating(true);
+    setGenerationStep({
+      step: 1,
+      label: isFreeTier ? 'Engaging provider fallback chain...' : 'Analyzing portrait facial geometry...',
+      percentage: 20
+    });
 
-      const nameA = pA.replace(/[:\[\]]/g, '').trim();
-      const nameB = pB.replace(/[:\[\]]/g, '').trim();
-      setContact((prev) => ({
-        ...prev,
-        senderName: nameA || 'Me',
-        contactName: nameB || 'Alex',
-      }));
-
-      const reAnalyzed = analyzeRawTextToTaggedLines(
-        rawTranscript,
-        newConfig,
-        nameA || 'Me',
-        nameB || 'Alex'
-      );
-      setTaggedLines(reAnalyzed);
+    const startTime = Date.now();
+    let activeSeed = seed;
+    if (!isSeedLocked) {
+      activeSeed = Math.floor(Math.random() * 900000) + 100000;
+      setSeed(activeSeed);
     }
-  }, [rawTranscript]);
-
-  // Media Export Handler
-  const handleStartExport = async () => {
-    if (appliedMessages.length === 0 || isExporting) return;
-
-    setIsExporting(true);
-    setIsExportModalOpen(true);
-    setIsPlaying(false);
-
-    abortControllerRef.current = new AbortController();
 
     try {
-      await exportChatMedia({
-        messages: appliedMessages,
-        contact,
-        theme: chatTheme,
-        format: exportFormat,
-        resolution: exportResolution,
-        fps: exportFormat === 'gif' ? 16 : 60,
-        isPro: subscription.isPro,
-        signal: abortControllerRef.current.signal,
-        onProgress: (progress) => {
-          setExportProgress(progress);
+      const result = await generateCartoonCharacter({
+        originalImageDataUrl: currentImage,
+        artStyle: selectedStyle,
+        pose: selectedPose,
+        wardrobe: selectedWardrobe,
+        customWardrobeText,
+        expression: selectedExpression,
+        seed: activeSeed,
+        additionalNotes,
+        settings,
+        offlineSettings,
+        isFreeTier,
+        userId: currentUser?.id,
+        onProgress: (step, label, percentage) => {
+          setGenerationStep({ step, label, percentage });
         },
+        onFallback: (reason) => {
+          showToast(`⚠️ ${reason}`);
+        }
       });
 
-      handleIncrementDownload();
+      if (isFreeTier) {
+        // Refresh daily usage from server (server atomically consumed 1 allowance)
+        refreshDailyUsage();
+        showToast('✨ Free Tier AI cartoon generated successfully via provider fallback chain!');
+      } else {
+        // Paid Tier generation
+        if (!settings.geminiApiKey?.trim()) {
+          const updatedCredits = consumeCredit(userCredits);
+          setUserCredits(updatedCredits);
+          syncUserCreditsToProfile(updatedCredits);
+        }
+        showToast('✨ AI Cartoon character generated successfully!');
+      }
 
-      // Automatically store in user's 30-day creation history
-      if (currentUser?.id) {
-        saveCreationRecord(currentUser.id, {
-          title: `${contact.senderName} & ${contact.contactName} Chat`,
-          personAName: contact.senderName,
-          personBName: contact.contactName,
-          messageCount: appliedMessages.length,
-          format: exportFormat,
-          resolution: exportResolution,
-          rawTranscript,
-          taggedLines,
-          contactSnapshot: contact,
-          themeModeSnapshot: chatThemeMode,
-          fileName: `whatsapp_chat_${contact.contactName.toLowerCase().replace(/\s+/g, '_')}.${exportFormat}`,
-        });
+      const newHistoryId = `var-${Date.now()}`;
+      const newHistoryItem: HistoryItem = {
+        id: newHistoryId,
+        timestamp: Date.now(),
+        expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000, // 30-day cloud retention
+        originalImage: currentImage,
+        generatedImage: result.imageUrl,
+        artStyle: selectedStyle.id,
+        pose: selectedPose.id,
+        wardrobe: selectedWardrobe.id,
+        customWardrobeText,
+        expression: selectedExpression.id,
+        seed: activeSeed,
+        promptUsed: result.promptUsed,
+        aspectRatio: settings.aspectRatio,
+        durationMs: Date.now() - startTime,
+        isMock: result.isMock
+      };
+
+      setGeneratedImage(result.imageUrl);
+      if (result.debugLayers) {
+        setDebugLayers(result.debugLayers);
       }
-    } catch (err: any) {
-      if (err.message !== 'Export cancelled by user.') {
-        console.error('Export error:', err);
+      setActiveHistoryId(newHistoryId);
+      setHistory((prev) => [newHistoryItem, ...prev.slice(0, 19)]);
+
+      // Save to cloud Firestore if user is authenticated
+      if (currentUser) {
+        saveCreationToFirestore(currentUser.id, newHistoryItem).catch((e) =>
+          console.warn('Firestore creation save error:', e)
+        );
       }
+    } catch (err: unknown) {
+      console.error(err);
+      const errMsg = err instanceof Error ? err.message : 'Processing failed. Please check image or try another photo.';
+      showToast(`⚠️ ${errMsg}`);
     } finally {
-      setIsExporting(false);
+      setIsGenerating(false);
+    }
+  }, [
+    isGenerating,
+    currentImage,
+    isFreeTier,
+    dailyUsage,
+    refreshDailyUsage,
+    seed,
+    isSeedLocked,
+    selectedStyle,
+    selectedPose,
+    selectedWardrobe,
+    customWardrobeText,
+    selectedExpression,
+    additionalNotes,
+    settings,
+    offlineSettings,
+    userCredits,
+    currentUser
+  ]);
+
+  // Keyboard Shortcuts Listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) {
+        return;
+      }
+
+      // ⌘/Ctrl + Enter -> Generate
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        handleGenerate();
+        return;
+      }
+
+      // 'c' or 'C' -> Crop tool
+      if (e.key === 'c' || e.key === 'C') {
+        e.preventDefault();
+        if (currentImage) setIsCropModalOpen(true);
+        return;
+      }
+
+      // 'r' or 'R' -> Randomize seed
+      if (e.key === 'r' || e.key === 'R') {
+        e.preventDefault();
+        handleRandomizeSeed();
+        return;
+      }
+
+      // 'l' or 'L' -> Toggle seed lock
+      if (e.key === 'l' || e.key === 'L') {
+        e.preventDefault();
+        handleToggleSeedLock();
+        return;
+      }
+
+      // Escape -> close modals
+      if (e.key === 'Escape') {
+        setIsCropModalOpen(false);
+        setIsSettingsModalOpen(false);
+        setIsShortcutsModalOpen(false);
+        setIsUnlockModalOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleGenerate, currentImage]);
+
+  // History item selection
+  const handleSelectHistoryItem = (item: HistoryItem) => {
+    setGeneratedImage(item.generatedImage);
+    setCurrentImage(item.originalImage);
+    setActiveHistoryId(item.id);
+    const style = ART_STYLES.find((s) => s.id === item.artStyle);
+    if (style) setSelectedStyle(style);
+    const pose = POSES.find((p) => p.id === item.pose);
+    if (pose) setSelectedPose(pose);
+    const wardrobe = WARDROBES.find((w) => w.id === item.wardrobe);
+    if (wardrobe) setSelectedWardrobe(wardrobe);
+    setSeed(item.seed);
+    setMobileTab('canvas');
+    showToast(`Restored character from ${new Date(item.timestamp).toLocaleTimeString()}`);
+  };
+
+  const handleDeleteHistoryItem = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setHistory((prev) => prev.filter((item) => item.id !== id));
+    if (activeHistoryId === id) {
+      setActiveHistoryId(null);
     }
   };
 
-  const handleCancelRecording = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    setIsExporting(false);
-    setIsExportModalOpen(false);
+  const handleClearHistory = () => {
+    setHistory([]);
+    setActiveHistoryId(null);
+    showToast('History cleared');
   };
 
-  const isDark = appThemeMode === 'dark';
+  // Export Download PNG with Watermark Logic
+  const handleDownload = async () => {
+    if (!generatedImage) return;
+    const baseName = `iam-cartoon-${selectedStyle.id}-${selectedPose.id}-seed${seed}`;
+    try {
+      await downloadImageWithWatermarkOption(generatedImage, baseName, isCurrentUnlocked);
+      showToast(
+        isCurrentUnlocked
+          ? 'Downloaded Clean 4K Ultra-HD PNG'
+          : 'Downloaded PNG (Free Preview with Watermark)'
+      );
+    } catch (e) {
+      console.error(e);
+      showToast('Download failed. Try right clicking to save.');
+    }
+  };
+
+  // Copy to Clipboard
+  const handleCopyToClipboard = async (): Promise<boolean> => {
+    if (!generatedImage) return false;
+
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = 1024;
+      canvas.height = 1024;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return false;
+
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = generatedImage;
+      });
+
+      ctx.drawImage(img, 0, 0, 1024, 1024);
+
+      return new Promise((resolve) => {
+        canvas.toBlob(async (blob) => {
+          if (!blob) {
+            resolve(false);
+            return;
+          }
+          try {
+            await navigator.clipboard.write([
+              new ClipboardItem({
+                'image/png': blob
+              })
+            ]);
+            showToast('Cartoon copied to clipboard!');
+            resolve(true);
+          } catch (err) {
+            console.warn('Direct clipboard write failed, copying data URL fallback', err);
+            await navigator.clipboard.writeText(generatedImage);
+            showToast('Copied image data to clipboard');
+            resolve(true);
+          }
+        }, 'image/png');
+      });
+    } catch (err) {
+      console.error(err);
+      showToast('Failed to copy to clipboard');
+      return false;
+    }
+  };
+
+  // Reset Canvas
+  const handleReset = () => {
+    setGeneratedImage(null);
+    setActiveHistoryId(null);
+    showToast('Canvas reset');
+  };
+
+  const handleLoginSuccess = async (user: UserProfile) => {
+    setLocalCurrentUser(user);
+    if (user.credits) {
+      setUserCredits(user.credits);
+      saveUserCredits(user.credits);
+    }
+    try {
+      const cloudCreations = await loadCreationsFromFirestore(user.id);
+      if (cloudCreations && cloudCreations.length > 0) {
+        setHistory((prev) => {
+          const combined = [...cloudCreations, ...prev];
+          const unique = Array.from(new Map(combined.map((item) => [item.id, item])).values());
+          return unique.slice(0, 25);
+        });
+        showToast(`☁️ Loaded ${cloudCreations.length} saved cartoon variations from cloud`);
+      }
+    } catch (e) {
+      console.warn('Could not load cloud creations:', e);
+    }
+  };
+
+  const handleLogout = () => {
+    setCurrentUser(null);
+    setLocalCurrentUser(null);
+    showToast('Signed out of account');
+  };
 
   return (
-    <div
-      className={`min-h-screen flex flex-col font-sans transition-colors selection:bg-emerald-500/30 selection:text-emerald-500 ${
-        isDark ? 'bg-zinc-950 text-zinc-100' : 'bg-zinc-100 text-zinc-900'
-      }`}
-    >
-      {/* Top Header with Sign-In, 30-Day History, Web App Day / Night Switcher & Upgrade Pro */}
-      <WorkstationHeader
-        appThemeMode={appThemeMode}
-        onToggleAppTheme={handleToggleAppTheme}
-        downloadCount={downloadCount}
-        subscription={subscription}
-        user={currentUser}
+    <div className="flex flex-col h-screen w-screen bg-[#0b0f17] text-slate-100 overflow-hidden">
+      {/* Top Navigation Header */}
+      <Header
+        settings={settings}
+        userCredits={userCredits}
+        currentUser={currentUser}
+        isCreator={isCreator}
+        onOpenCreatorAdmin={() => setIsCreatorAdminOpen(true)}
         onOpenAuthModal={() => setIsAuthModalOpen(true)}
-        onOpenProfileModal={() => setIsProfileModalOpen(true)}
-        onOpenUpgradeModal={() => setIsUpgradeModalOpen(true)}
-        onOpenSettings={() => setIsSettingsOpen(true)}
-        onOpenHelp={() => setIsHelpModalOpen(true)}
+        onOpenUnlockModal={() => setIsUnlockModalOpen(true)}
+        onLogout={handleLogout}
+        onOpenSettings={() => setIsSettingsModalOpen(true)}
+        onOpenShortcuts={() => setIsShortcutsModalOpen(true)}
+        activeMobileTab={mobileTab}
+        onToggleMobileTab={setMobileTab}
       />
 
-      {/* MOBILE / TABLET TAB SELECTOR */}
-      <div
-        className={`lg:hidden w-full border-b px-3 py-2 flex items-center justify-center sticky top-16 z-20 ${
-          isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-white border-zinc-200 shadow-xs'
-        }`}
-      >
+      {/* Main Workspace */}
+      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
+        {/* Controls Column */}
         <div
-          className={`grid grid-cols-2 gap-1.5 w-full max-w-md p-1 rounded-xl border text-xs font-semibold ${
-            isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-zinc-100 border-zinc-300'
-          }`}
+          className={`h-full overflow-hidden shrink-0 transition-all ${
+            mobileTab === 'controls' ? 'flex flex-col flex-1' : 'hidden'
+          } lg:flex lg:w-[380px] xl:w-[420px]`}
         >
-          <button
-            type="button"
-            onClick={() => setMobileTab('editor')}
-            className={`py-2 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-              mobileTab === 'editor'
-                ? isDark
-                  ? 'bg-zinc-800 text-emerald-400 shadow-xs'
-                  : 'bg-white text-emerald-700 shadow-xs border border-zinc-200'
-                : isDark
-                ? 'text-zinc-400 hover:text-zinc-200'
-                : 'text-zinc-600 hover:text-zinc-900'
-            }`}
-          >
-            <FileEdit className="w-3.5 h-3.5" />
-            <span>Transcript & Tags</span>
-            {hasPendingChanges && (
-              <span className="w-2 h-2 rounded-full bg-emerald-500" />
-            )}
-          </button>
+          <ControlsColumn
+            isFreeTier={isFreeTier}
+            onToggleFreeTier={setIsFreeTier}
+            dailyUsage={dailyUsage}
+            isOfflineMode={settings.useMockMode}
+            onToggleOfflineMode={handleToggleOfflineMode}
+            offlineSettings={offlineSettings}
+            onOfflineSettingsChange={handleOfflineSettingsChange}
+            isOfflineReady={isOfflineReady}
+            debugLayers={debugLayers}
+            currentImage={currentImage}
+            currentImageName={currentImageName}
+            onImageChange={(dataUrl, name) => {
+              setCurrentImage(dataUrl);
+              setCurrentImageName(name);
+              showToast('Portrait image uploaded');
+            }}
+            onOpenCropModal={() => setIsCropModalOpen(true)}
+            selectedStyle={selectedStyle}
+            onSelectStyle={setSelectedStyle}
+            selectedPose={selectedPose}
+            onSelectPose={setSelectedPose}
+            selectedWardrobe={selectedWardrobe}
+            onSelectWardrobe={setSelectedWardrobe}
+            customWardrobeText={customWardrobeText}
+            onCustomWardrobeTextChange={setCustomWardrobeText}
+            selectedExpression={selectedExpression}
+            onSelectExpression={setSelectedExpression}
+            seed={seed}
+            isSeedLocked={isSeedLocked}
+            onToggleSeedLock={handleToggleSeedLock}
+            onRandomizeSeed={handleRandomizeSeed}
+            onSeedChange={setSeed}
+            additionalNotes={additionalNotes}
+            onAdditionalNotesChange={setAdditionalNotes}
+            isGenerating={isGenerating}
+            onGenerate={handleGenerate}
+          />
+        </div>
 
-          <button
-            type="button"
-            onClick={() => setMobileTab('preview')}
-            className={`py-2 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-              mobileTab === 'preview'
-                ? 'bg-emerald-600 text-white shadow-xs'
-                : isDark
-                ? 'text-zinc-400 hover:text-zinc-200'
-                : 'text-zinc-600 hover:text-zinc-900'
-            }`}
-          >
-            <Smartphone className="w-3.5 h-3.5" />
-            <span>WhatsApp View ({appliedMessages.length})</span>
-          </button>
+        {/* Canvas & History Column */}
+        <div
+          className={`h-full overflow-hidden flex-col flex-1 ${
+            mobileTab === 'canvas' ? 'flex' : 'hidden'
+          } lg:flex`}
+        >
+          {/* Main High-Resolution Canvas Area */}
+          <CanvasArea
+            originalImage={currentImage}
+            generatedImage={generatedImage}
+            artStyle={selectedStyle}
+            pose={selectedPose}
+            seed={seed}
+            isGenerating={isGenerating}
+            generationStep={generationStep}
+            isUnlocked={isCurrentUnlocked}
+            onOpenUnlockModal={() => setIsUnlockModalOpen(true)}
+            onDownload={handleDownload}
+            onCopyToClipboard={handleCopyToClipboard}
+            onReset={handleReset}
+            onOpenUpload={() => setMobileTab('controls')}
+            onToast={showToast}
+          />
+
+          {/* Bottom Variations History Reel */}
+          <HistoryReel
+            history={history}
+            activeId={activeHistoryId}
+            onSelectHistoryItem={handleSelectHistoryItem}
+            onDeleteHistoryItem={handleDeleteHistoryItem}
+            onClearHistory={handleClearHistory}
+          />
         </div>
       </div>
 
-      {/* Main Workstation Layout */}
-      <main className="flex-1 w-full max-w-[1700px] mx-auto p-3 sm:p-4 lg:p-6 grid grid-cols-1 lg:grid-cols-12 gap-5 lg:gap-6 items-start">
-        {/* LEFT COLUMN: Transcript & Tags Editor */}
-        <div
-          className={`lg:col-span-7 flex flex-col gap-4 ${
-            mobileTab === 'preview' ? 'hidden lg:flex' : 'flex'
-          }`}
-        >
-          <div className="flex-1 min-h-[460px]">
-            <TranscriptEditor
-              rawTranscript={rawTranscript}
-              onChangeTranscript={handleUpdateRawTranscript}
-              taggedLines={taggedLines}
-              onChangeTaggedLines={handleUpdateTaggedLines}
-              parserConfig={parserConfig}
-              onChangeParserConfig={setParserConfig}
-              personAName={contact.senderName}
-              personBName={contact.contactName}
-              onUpdateSpeakerNames={handleUpdateSpeakerNames}
-              appliedMessageCount={appliedMessages.length}
-              hasPendingChanges={hasPendingChanges}
-              isGenerating={isBubblesGenerating}
-              onMakeBubbles={handleTriggerMakeBubbles}
-              onLoadSample={handleLoadSample}
-              onAutoDetectPrefixes={handleAutoDetectPrefixes}
-              appThemeMode={appThemeMode}
-              subscription={subscription}
-              onOpenUpgradeModal={() => setIsUpgradeModalOpen(true)}
-            />
-          </div>
-        </div>
-
-        {/* RIGHT COLUMN: WhatsApp View (Phone Screen + Video Timeline Controls) */}
-        <div
-          id="whatsapp-view-section"
-          className={`lg:col-span-5 flex flex-col items-center border rounded-2xl p-3 sm:p-4 lg:p-5 space-y-4 transition-colors ${
-            mobileTab === 'editor' ? 'hidden lg:flex' : 'flex'
-          } ${
-            isDark
-              ? 'bg-zinc-900/40 border-zinc-800/80 backdrop-blur-sm'
-              : 'bg-white/90 border-zinc-200 shadow-sm backdrop-blur-sm'
-          }`}
-        >
-          {/* Section Header: WhatsApp View */}
-          <div className="w-full flex items-center justify-between pb-1 border-b border-zinc-800/40">
-            <div className="flex items-center gap-2">
-              <div className="p-1 rounded-lg bg-emerald-500/10 text-emerald-500">
-                <MessageSquare className="w-3.5 h-3.5" />
-              </div>
-              <div>
-                <h3
-                  className={`text-xs font-bold tracking-tight uppercase ${
-                    isDark ? 'text-zinc-200' : 'text-zinc-800'
-                  }`}
-                >
-                  WhatsApp View
-                </h3>
-              </div>
-            </div>
-            <span
-              className={`text-[11px] px-2 py-0.5 rounded-full border font-mono font-semibold ${
-                isDark
-                  ? 'bg-zinc-950 border-zinc-800 text-zinc-400'
-                  : 'bg-zinc-100 border-zinc-300 text-zinc-600'
-              }`}
-            >
-              {appliedMessages.length} Messages
-            </span>
-          </div>
-
-          {/* Android Phone Mockup */}
-          <PhoneMockup
-            messages={appliedMessages}
-            currentTimeMs={currentTimeMs}
-            contact={contact}
-            theme={chatTheme}
-            isExporting={isExporting}
-            exportProgress={exportProgress}
-            onStartExport={handleStartExport}
-            showTypingBubble={animSettings.showTypingBubble}
-            exportFormat={exportFormat}
-            onChangeExportFormat={setExportFormat}
-            exportResolution={exportResolution}
-            onChangeExportResolution={setExportResolution}
-            isPro={subscription.isPro}
-            onOpenUpgrade={() => setIsUpgradeModalOpen(true)}
-          />
-
-          {/* Video Timeline Playback Controls Bar */}
-          <PlaybackControls
-            isPlaying={isPlaying}
-            onTogglePlay={handleTogglePlay}
-            onReset={handleReset}
-            currentTimeMs={currentTimeMs}
-            totalDurationMs={totalDurationMs}
-            onSeek={handleSeek}
-            animSettings={animSettings}
-            onChangeAnimSettings={setAnimSettings}
-            activeMessageIndex={activeMessageIndex}
-            totalMessages={appliedMessages.length}
-            appThemeMode={appThemeMode}
-          />
-        </div>
-      </main>
-
-      {/* Authentication Modal (Google & Email/Password) */}
+      {/* Modals */}
       <AuthModal
         isOpen={isAuthModalOpen}
         onClose={() => setIsAuthModalOpen(false)}
-        onAuthSuccess={handleAuthSuccess}
-        appThemeMode={appThemeMode}
+        onLoginSuccess={handleLoginSuccess}
+        onToast={showToast}
       />
 
-      {/* User Profile & 30-Day Creation Archive Modal */}
-      {currentUser && (
-        <UserProfileModal
-          isOpen={isProfileModalOpen}
-          onClose={() => setIsProfileModalOpen(false)}
-          user={currentUser}
-          onUpdateUser={handleUpdateUser}
-          onLoadCreation={handleLoadCreation}
-          onOpenUpgrade={() => setIsUpgradeModalOpen(true)}
-          appThemeMode={appThemeMode}
-        />
-      )}
-
-      {/* Upgrade to Pro Modal */}
-      <UpgradeModal
-        isOpen={isUpgradeModalOpen}
-        onClose={() => setIsUpgradeModalOpen(false)}
-        subscription={subscription}
-        onUpdateSubscription={handleUpdateSubscription}
-        appThemeMode={appThemeMode}
+      <CropModal
+        isOpen={isCropModalOpen}
+        onClose={() => setIsCropModalOpen(false)}
+        imageUrl={currentImage}
+        onApplyCrop={handleApplyCrop}
       />
 
-      {/* Unified WhatsApp Settings Modal */}
       <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        contact={contact}
-        onChangeContact={setContact}
-        animSettings={animSettings}
-        onChangeAnimSettings={setAnimSettings}
-        theme={chatTheme}
-        onToggleTheme={handleToggleChatTheme}
-        exportFormat={exportFormat}
-        onChangeExportFormat={setExportFormat}
-        exportResolution={exportResolution}
-        onChangeExportResolution={setExportResolution}
+        isOpen={isSettingsModalOpen}
+        onClose={() => setIsSettingsModalOpen(false)}
+        settings={settings}
+        onSaveSettings={handleSaveSettings}
+        currentUser={currentUser}
+        onOpenAuthModal={() => setIsAuthModalOpen(true)}
+        onLogout={handleLogout}
       />
 
-      {/* Export Modal with Progress, Video/GIF Preview & Direct Download */}
-      <ExportModal
-        isOpen={isExportModalOpen}
-        onClose={() => setIsExportModalOpen(false)}
-        onCancelRecording={handleCancelRecording}
-        exportProgress={exportProgress}
-        format={exportFormat}
-        onChangeFormat={setExportFormat}
-        resolution={exportResolution}
-        onChangeResolution={setExportResolution}
-        contactName={contact.contactName}
-        senderName={contact.senderName}
-        onDownloaded={handleIncrementDownload}
-        onStartExport={handleStartExport}
+      <ShortcutsModal
+        isOpen={isShortcutsModalOpen}
+        onClose={() => setIsShortcutsModalOpen(false)}
       />
 
+      <UnlockModal
+        isOpen={isUnlockModalOpen}
+        onClose={() => setIsUnlockModalOpen(false)}
+        userCredits={userCredits}
+        onCreditsUpdated={(updated) => {
+          setUserCredits(updated);
+          saveUserCredits(updated);
+          syncUserCreditsToProfile(updated);
+        }}
+        currentImageId={activeHistoryId || undefined}
+        onToast={showToast}
+      />
 
-      {/* Help & Guide Modal */}
-      <HelpModal isOpen={isHelpModalOpen} onClose={() => setIsHelpModalOpen(false)} />
+      {/* Creator-Only Built-in Provider Management Modal */}
+      <CreatorAdminModal
+        isOpen={isCreatorAdminOpen}
+        onClose={() => setIsCreatorAdminOpen(false)}
+        isCreator={isCreator}
+        userEmail={currentUser?.email}
+      />
+
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div
+          className={`fixed bottom-5 left-1/2 -translate-x-1/2 sm:left-auto sm:right-6 sm:translate-x-0 z-50 px-4 py-3 rounded-xl shadow-2xl backdrop-blur-md flex items-center gap-2.5 animate-in fade-in slide-in-from-bottom-2 duration-200 text-xs font-semibold max-w-sm sm:max-w-md ${
+            toastMessage.includes('⚠️')
+              ? 'bg-amber-950/95 border border-amber-500/50 text-amber-200'
+              : 'bg-slate-900/95 border border-blue-500/50 text-slate-100'
+          }`}
+        >
+          <div
+            className={`w-2 h-2 rounded-full shrink-0 ${
+              toastMessage.includes('⚠️') ? 'bg-amber-400 animate-pulse' : 'bg-blue-400 animate-ping'
+            }`}
+          />
+          <span className="leading-snug">{toastMessage}</span>
+        </div>
+      )}
     </div>
   );
 }

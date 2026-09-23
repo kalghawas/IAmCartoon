@@ -1,6 +1,6 @@
 {
-  "name": "I Am whatsapp",
-  "description": "Animate conversation transcripts inside a pixel-accurate Android WhatsApp chat screen with screenshots and real-time video export.",
+  "name": "I am Cartoon",
+  "description": "Transform portrait photos into stylized cartoon characters with customizable poses, outfits, and art styles.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
